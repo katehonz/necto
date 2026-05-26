@@ -14,7 +14,7 @@
 ##   AppRepo.all(Query.fromSchema(User).where("age", Gt, "18"))
 ##   AppRepo.insert(userChangeset)
 
-import std/[macros, options, strutils]
+import std/[macros, options, strutils, tables]
 import ./adapters/base
 import ./query
 import ./schema
@@ -230,10 +230,45 @@ proc buildDeleteSql(cs: auto, meta: SchemaMeta): (string, seq[string]) =
             meta.primaryKeyField & "\" = $1"
   result = (sql, @[pkVal])
 
+# --- Constraint Error Handling (Ecto pattern) ---
+
+proc parseConstraintName*(errorMsg: string): string =
+  ## Извлича името на constraint от PostgreSQL грешка.
+  let idx = errorMsg.find("violates ")
+  if idx >= 0:
+    let after = errorMsg[idx + 9 .. ^1]
+    let start = after.find('"')
+    let endPos = after.find('"', start + 1)
+    if start >= 0 and endPos > start:
+      return after[start + 1 .. endPos - 1]
+  result = ""
+
+proc handleConstraintError*[T](cs: var Changeset[T], errorMsg: string) =
+  ## Анализира DB грешка и попълва changeset errors ако има
+  ## регистрирани constraints за засегнатото поле.
+  let constraintName = parseConstraintName(errorMsg)
+  if constraintName.len == 0:
+    return
+
+  let isUniqueViolation = errorMsg.contains("unique") or errorMsg.contains("23505")
+  let isFkViolation = errorMsg.contains("foreign key") or errorMsg.contains("23503")
+
+  if isUniqueViolation or isFkViolation:
+    for field, metas in cs.constraints.pairs():
+      for m in metas:
+        if isUniqueViolation and m.kind == ckUnique:
+          cs.addError(field, m.message)
+          return
+        elif isFkViolation and m.kind == ckForeignKey:
+          cs.addError(field, m.message)
+          return
+
 # --- Write API (templates) ---
 
 template insert*[T](repo: Repo, cs: Changeset[T]): T =
   ## Вмъква запис от changeset.
+  ## Ако DB върне constraint violation (unique/fk), грешката се
+  ## попълва в changeset и се вдига ConstraintError.
   mixin schemaMeta, load
   block:
     if cs.isInvalid():
@@ -250,11 +285,21 @@ template insert*[T](repo: Repo, cs: Changeset[T]): T =
         load(rows[0], T)
       else:
         cs.data
+    except DatabaseError as e:
+      var cs2 = cs
+      handleConstraintError(cs2, e.msg)
+      if cs2.isInvalid():
+        var ce = new(ConstraintError)
+        ce.msg = e.msg
+        ce.constraintName = ""
+        raise ce
+      raise
     finally:
       repo.releaseConn(conn)
 
 template update*[T](repo: Repo, cs: Changeset[T]): T =
   ## Актуализира запис от changeset.
+  ## Ако DB върне constraint violation, обработва се аналогично на insert.
   mixin schemaMeta, load
   block:
     if cs.isInvalid():
@@ -277,6 +322,15 @@ template update*[T](repo: Repo, cs: Changeset[T]): T =
         load(rows[0], T)
       else:
         cs.data
+    except DatabaseError as e:
+      var cs2 = cs
+      handleConstraintError(cs2, e.msg)
+      if cs2.isInvalid():
+        var ce = new(ConstraintError)
+        ce.msg = e.msg
+        ce.constraintName = parseConstraintName(e.msg)
+        raise ce
+      raise
     finally:
       repo.releaseConn(conn)
 

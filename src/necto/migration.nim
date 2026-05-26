@@ -76,6 +76,16 @@ proc col*(name: string, dbType: string; nullable: bool = true, default: string =
   ColumnDef(name: name, dbType: dbType, null: nullable, default: default,
             unique: unique, reference: reference)
 
+proc references*(tableName: string; colName: string = "", onDelete: string = "SET NULL"): ColumnDef =
+  ## Ecto-style: създава FK колона като част от createTable.
+  let fkCol = if colName.len > 0: colName else: tableName & "_id"
+  ColumnDef(
+    name: fkCol,
+    dbType: "bigint",
+    null: true,
+    reference: tableName & "(id)"
+  )
+
 proc timestamps*(): seq[ColumnDef] =
   @[
     col("created_at", "timestamp with time zone", nullable = false, default = "NOW()"),
@@ -124,6 +134,19 @@ proc dropColumnSql*(tableName, colName: string): string =
 proc renameColumnSql*(tableName, oldName, newName: string): string =
   "ALTER TABLE \"" & tableName & "\" RENAME COLUMN \"" & oldName & "\" TO \"" & newName & "\""
 
+proc renameTableSql*(oldName, newName: string): string =
+  "ALTER TABLE \"" & oldName & "\" RENAME TO \"" & newName & "\""
+
+proc addReferenceSql*(tableName, refTable, colName: string;
+                      onDelete: string = "SET NULL"): string =
+  let fkCol = if colName.len > 0: colName else: refTable & "_id"
+  "ALTER TABLE \"" & tableName & "\" ADD COLUMN \"" & fkCol &
+  "\" BIGINT REFERENCES \"" & refTable & "\"(id) ON DELETE " & onDelete
+
+proc removeReferenceSql*(tableName, refTable, colName: string): string =
+  let fkCol = if colName.len > 0: colName else: refTable & "_id"
+  "ALTER TABLE \"" & tableName & "\" DROP COLUMN IF EXISTS \"" & fkCol & "\""
+
 proc createIndexSql*(tableName: string, columns: seq[string];
                      unique: bool = false, indexName: string = ""): string =
   var name = indexName
@@ -156,6 +179,17 @@ proc dropColumn*(repo: auto, tableName, colName: string) =
 proc renameColumn*(repo: auto, tableName, oldName, newName: string) =
   repo.exec(renameColumnSql(tableName, oldName, newName))
 
+proc renameTable*(repo: auto, oldName, newName: string) =
+  repo.exec(renameTableSql(oldName, newName))
+
+proc addReference*(repo: auto, tableName, refTable: string;
+                   colName: string = "", onDelete: string = "SET NULL") =
+  repo.exec(addReferenceSql(tableName, refTable, colName, onDelete))
+
+proc removeReference*(repo: auto, tableName, refTable: string;
+                      colName: string = "") =
+  repo.exec(removeReferenceSql(tableName, refTable, colName))
+
 proc createIndex*(repo: auto, tableName: string, columns: seq[string];
                   unique: bool = false, indexName: string = "") =
   repo.exec(createIndexSql(tableName, columns, unique, indexName))
@@ -167,6 +201,31 @@ proc dropIndex*(repo: auto, tableName: string, columns: seq[string] = @[];
 
 proc execSql*(repo: auto, sql: string) =
   repo.exec(sql)
+
+proc execute*(repo: auto, sql: string) =
+  ## Ecto-style alias за execSql.
+  repo.exec(sql)
+
+proc modify*(repo: auto, tableName, colName, newDbType: string;
+             nullable: bool = true, default: string = "") =
+  ## Ecto-style: променя тип/конфигурация на колона.
+  var parts = @["ALTER TABLE \"" & tableName & "\" ALTER COLUMN \"" & colName & "\" TYPE " & newDbType]
+  if not nullable and default.len > 0:
+    parts.add("ALTER TABLE \"" & tableName & "\" ALTER COLUMN \"" & colName & "\" SET DEFAULT " & default)
+    parts.add("ALTER TABLE \"" & tableName & "\" ALTER COLUMN \"" & colName & "\" SET NOT NULL")
+  elif default.len > 0:
+    parts.add("ALTER TABLE \"" & tableName & "\" ALTER COLUMN \"" & colName & "\" SET DEFAULT " & default)
+  repo.exec(parts.join("; "))
+
+proc addConstraint*(repo: auto, tableName, constraintName, definition: string) =
+  ## Добавя именуван constraint (CHECK, UNIQUE, etc).
+  repo.exec("ALTER TABLE \"" & tableName & "\" ADD CONSTRAINT \"" &
+            constraintName & "\" " & definition)
+
+proc dropConstraint*(repo: auto, tableName, constraintName: string) =
+  ## Премахва именуван constraint.
+  repo.exec("ALTER TABLE \"" & tableName & "\" DROP CONSTRAINT IF EXISTS \"" &
+            constraintName & "\"")
 
 # --- Макро за дефиниране на миграция с auto-registration ---
 

@@ -28,3 +28,7 @@ type
 
   AdapterError* = object of NectoError
     ## Вдигнато при грешка в адаптера (connect, disconnect).
+
+  ConstraintError* = object of NectoError
+    ## Вдигнато при нарушение на DB constraint (unique, foreign key, check).
+    constraintName*: string

@@ -118,3 +118,33 @@ proc dumpValue*[T](val: Option[T]): string =
 proc dumpValue*[T](val: seq[T]): string =
   ## Dump PostgreSQL array. За сега placeholder.
   "{}"
+
+# --- Cast raw string to DB-safe string ---
+
+proc castToDb*(val: string, nimTypeStr: string): string =
+  ## Валидира и конвертира raw string към DB-съвместим string.
+  ## Прави basic type checking според Nim типа.
+  case nimTypeStr
+  of "string", "text":
+    result = val
+  of "int", "int32", "integer":
+    discard parseInt(val)
+    result = val
+  of "int64", "bigint":
+    discard parseBiggestInt(val)
+    result = val
+  of "float", "float64":
+    discard parseFloat(val)
+    result = val
+  of "bool", "boolean":
+    discard parseBool(val)
+    result = val
+  else:
+    if nimTypeStr.startsWith("Option["):
+      if val.len == 0 or val == "null" or val == "nil":
+        result = "null"
+      else:
+        let inner = nimTypeStr[7..^2]
+        result = castToDb(val, inner)
+    else:
+      result = val

@@ -8,7 +8,7 @@
 ##             .validate_required(@["name", "email"])
 ##             .validate_format("email", re".+@.+")
 
-import std/[tables, strutils, re, options, macros]
+import std/[tables, strutils, re, options, macros, sequtils]
 import ./schema
 import ./type_system
 import ./errors
@@ -20,6 +20,14 @@ type
     field*: string
     message*: string
 
+  ConstraintKind* = enum
+    ckUnique, ckForeignKey, ckExclusion
+
+  ConstraintMeta* = object
+    kind*: ConstraintKind
+    field*: string
+    message*: string
+
   Changeset*[T] = object
     ## Структура, която държи състоянието на една промяна.
     data*: T
@@ -28,6 +36,7 @@ type
     errors*: Table[string, seq[string]]
     valid*: bool
     action*: string   # "insert", "update", "delete"
+    constraints*: Table[string, seq[ConstraintMeta]]
 
 # --- Конструктор ---
 
@@ -38,18 +47,37 @@ proc newChangeset*[T](data: T, params: Table[string, string] = initTable[string,
     changes: initTable[string, string](),
     errors: initTable[string, seq[string]](),
     valid: true,
-    action: ""
+    action: "",
+    constraints: initTable[string, seq[ConstraintMeta]]()
   )
 
 # --- Cast ---
 
-proc castFields*[T](cs: Changeset[T], permitted: openArray[string]): Changeset[T] =
+template castFields*[T](cs: Changeset[T], permitted: openArray[string]): Changeset[T] =
   ## Филтрира и конвертира позволените полета от params.
-  result = cs
-  for field in permitted:
-    if result.params.hasKey(field):
-      result.changes[field] = result.params[field]
-      # TODO: type casting според SchemaMeta
+  ## Използва SchemaMeta за правилно type casting.
+  mixin schemaMeta
+  block:
+    let meta = schemaMeta(T)
+    var result = cs
+    for field in permitted:
+      if result.params.hasKey(field):
+        var fmeta: FieldMeta
+        var found = false
+        for f in meta.fields:
+          if f.name == field:
+            fmeta = f
+            found = true
+            break
+        if found:
+          let rawVal = result.params[field]
+          try:
+            result.changes[field] = castToDb(rawVal, fmeta.nimType)
+          except ValueError:
+            result.addError(field, "is invalid")
+        else:
+          result.changes[field] = result.params[field]
+    result
 
 # --- Валидации ---
 
@@ -104,13 +132,39 @@ proc validateNumber*[T](cs: Changeset[T], field: string; greaterThan, lessThan: 
 
 # --- Constraints ---
 
-proc uniqueConstraint*[T](cs: Changeset[T], field: string): Changeset[T] =
+proc uniqueConstraint*[T](cs: Changeset[T], field: string, message: string = "has already been taken"): Changeset[T] =
   ## Маркира полето като subject към unique constraint.
   ## Проверката се случва в Repo при insert/update, като лови DB грешка.
   result = cs
+  if not result.constraints.hasKey(field):
+    result.constraints[field] = @[]
+  result.constraints[field].add(ConstraintMeta(
+    kind: ckUnique,
+    field: field,
+    message: message
+  ))
 
-proc foreignKeyConstraint*[T](cs: Changeset[T], field: string): Changeset[T] =
+proc foreignKeyConstraint*[T](cs: Changeset[T], field: string, message: string = "does not exist"): Changeset[T] =
+  ## Маркира полето като subject към foreign key constraint.
   result = cs
+  if not result.constraints.hasKey(field):
+    result.constraints[field] = @[]
+  result.constraints[field].add(ConstraintMeta(
+    kind: ckForeignKey,
+    field: field,
+    message: message
+  ))
+
+proc checkConstraint*[T](cs: Changeset[T], field: string, message: string = "is invalid"): Changeset[T] =
+  ## Маркира полето за check constraint.
+  result = cs
+  if not result.constraints.hasKey(field):
+    result.constraints[field] = @[]
+  result.constraints[field].add(ConstraintMeta(
+    kind: ckExclusion,
+    field: field,
+    message: message
+  ))
 
 # --- Helpers ---
 
@@ -128,3 +182,71 @@ proc getError*[T](cs: Changeset[T], field: string): seq[string] =
     cs.errors[field]
   else:
     @[]
+
+# --- Change Management ---
+
+proc putChange*[T](cs: Changeset[T], field: string, value: string): Changeset[T] =
+  ## Директно задава стойност в changeset (без да идва от params).
+  result = cs
+  result.changes[field] = value
+
+proc forceChange*[T](cs: Changeset[T], field: string, value: string): Changeset[T] =
+  ## Принудително задава стойност, дори ако не се различава от оригиналната.
+  result = cs
+  result.changes[field] = value
+
+proc deleteChange*[T](cs: Changeset[T], field: string): Changeset[T] =
+  ## Премахва поле от changes.
+  result = cs
+  result.changes.del(field)
+
+proc hasChange*[T](cs: Changeset[T], field: string): bool =
+  cs.changes.hasKey(field)
+
+proc changedFields*[T](cs: Changeset[T]): seq[string] =
+  toSeq(cs.changes.keys)
+
+iterator changes*[T](cs: Changeset[T]): (string, string) =
+  for key, val in cs.changes.pairs:
+    yield (key, val)
+
+# --- Apply Changes ---
+
+proc applyChanges*[T](cs: Changeset[T]): T =
+  ## Прилага промените към обекта без запис в БД.
+  ## Връща нов обект с нанесените стойности от changes.
+  result = cs.data
+  for field, value in cs.changes.pairs():
+    when compiles(setFieldValRuntime(result, field, value)):
+      setFieldValRuntime(result, field, value)
+    else:
+      discard
+
+# --- Constraint helpers ---
+
+proc getConstraints*[T](cs: Changeset[T], field: string): seq[ConstraintMeta] =
+  if cs.constraints.hasKey(field):
+    cs.constraints[field]
+  else:
+    @[]
+
+proc hasConstraints*[T](cs: Changeset[T]): bool =
+  cs.constraints.len > 0
+
+proc allConstraints*[T](cs: Changeset[T]): seq[(string, ConstraintMeta)] =
+  for field, metas in cs.constraints.pairs():
+    for m in metas:
+      result.add((field, m))
+
+# --- Ecto-style Constraint Helpers ---
+
+proc noAssocConstraint*[T](cs: Changeset[T], field: string, message: string = "does not exist"): Changeset[T] =
+  ## Проверява дали свързания обект съществува.
+  result = cs
+  if not result.constraints.hasKey(field):
+    result.constraints[field] = @[]
+  result.constraints[field].add(ConstraintMeta(
+    kind: ckForeignKey,
+    field: field,
+    message: message
+  ))

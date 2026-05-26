@@ -198,21 +198,21 @@ proc castFields*[T](cs: Changeset[T], permitted: openArray[string]): Changeset[T
 - [x] CLI tasks: migrate, rollback, status, gen_migration
 
 ### 🔥 Фаза 1: Core стабилност (КРИТИЧНО)
-- [ ] **Connection context** — thread-local conn за транзакции
-- [ ] **Bound queries** — всички заявки с `$N` placeholders + args
-- [ ] **Schema-aware cast** — Changeset прави реално type conversion
-- [ ] **Основни тестове** — поне 80% покритие на repo, query, changeset
-- [ ] **Integration test** — пълен CRUD цикъл върху реална PostgreSQL
+- [x] **Connection context** — thread-local conn за транзакции
+- [x] **Bound queries** — всички заявки с `$N` placeholders + args
+- [x] **Schema-aware cast** — Changeset прави реално type conversion
+- [x] **Основни тестове** — поне 80% покритие на repo, query, changeset
+- [x] **Integration test** — пълен CRUD цикъл върху реална PostgreSQL
 
 ### 🔥 Фаза 2: Query DSL (КРИТИЧНО)
-- [ ] `where(field, op, value)` с правилно parameter binding
-- [ ] `whereIt` макро — compile-time field checking
-- [ ] `select`, `order_by`, `limit`, `offset`, `distinct`
-- [ ] `join` — inner/left/right с type-safe колони
-- [ ] `count`, `sum`, `avg` агрегати
-- [ ] `group_by`, `having`
-- [ ] Subqueries: `where("id IN ?", subquery)`
-- [ ] Raw fragments: `where(fragment("lower(?) = ?", name, "ivan"))`
+- [x] `where(field, op, value)` с правилно parameter binding
+- [x] `whereIt` макро — compile-time field checking
+- [x] `select`, `order_by`, `limit`, `offset`, `distinct`
+- [x] `join` — inner/left/right с type-safe колони
+- [x] `count`, `sum`, `avg` агрегати
+- [x] `group_by`, `having`
+- [x] Subqueries: `where("id IN ?", subquery)`
+- [x] Raw fragments: `where(fragment("lower(?) = ?", name, "ivan"))`
 
 ### 🔥 Фаза 3: Асоциации и Preload (КРИТИЧНО)
 - [ ] `belongs_to` — batch preload (2 заявки)
@@ -224,16 +224,16 @@ proc castFields*[T](cs: Changeset[T], permitted: openArray[string]): Changeset[T
 
 ### Фаза 4: Advanced Changeset
 - [ ] `validate_confirmation`, `validate_exclusion`, `validate_subset`
-- [ ] `unique_constraint` с DB проверка (лови `unique_violation`)
-- [ ] `foreign_key_constraint` с DB проверка
+- [x] `unique_constraint` с DB проверка (лови `unique_violation`)
+- [x] `foreign_key_constraint` с DB проверка
 - [ ] `put_change`, `force_change`, `delete_change`
-- [ ] `apply_changes` — връща обект без запис в БД
+- [x] `apply_changes` — връща обект без запис в БД
 
 ### Фаза 5: Advanced Migrations
-- [ ] `rename_table`, `rename_column`
-- [ ] `add_index`, `drop_index` (concurrent)
-- [ ] `add_reference`, `remove_reference`
-- [ ] `execute` — raw SQL в миграция
+- [x] `rename_table`, `rename_column`
+- [x] `add_index`, `drop_index` (concurrent)
+- [x] `add_reference`, `remove_reference`
+- [x] `execute` — raw SQL в миграция
 - [ ] Migration rollback с `up`/`down` checksum валидация
 
 ### Фаза 6: Performance и Production readiness
