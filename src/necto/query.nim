@@ -190,11 +190,9 @@ proc having*[T](q: Query[T], field: string, op: WhereOp, value: string): Query[T
 
 proc fragment*(sql: string, args: varargs[string]): SqlFragment =
   ## Създава raw SQL фрагмент с $1, $2, ... параметри.
-  ## Placeholders ще бъдат преномерирани при генериране на крайния SQL.
-  result = SqlFragment(sql: sql)
-  for i, a in args:
-    result.sql = result.sql.replace("$" & $(i+1) & " ", "$" & $(i+1) & " ") 
-  result.args = @args
+  ## Забележка: аргументите се съхраняват в SqlFragment но трябва да бъдат
+  ## преномерирани и добавени към BoundQuery.args при генериране на SQL.
+  result = SqlFragment(sql: sql, args: @args)
 
 proc whereDynamic*[T](q: Query[T], frag: SqlFragment): Query[T] =
   ## Добавя raw SQL фрагмент като WHERE условие.
@@ -263,11 +261,11 @@ template toBoundQuery*[T](q: Query[T]): BoundQuery =
   if q.whereClauses.len > 0:
     parts.add("WHERE")
     var wheres: seq[string] = @[]
-    var needsOp = false
+    var isFirst = true
     for w in q.whereClauses:
-      if needsOp:
+      if not isFirst:
         wheres.add(w.conjunction)
-      needsOp = true
+      isFirst = false
 
       if w.field.contains("$1") or w.field.contains("?") or w.field.contains("("):
         wheres.add(w.field)
@@ -384,16 +382,6 @@ type
     conjunction: string  # "AND" / "OR"
 
 type WhereItClauseSeq = seq[WhereItClause]
-
-proc nimOpToSql(opStr: string): string {.compileTime.} =
-  case opStr
-  of "==": "="
-  of "!=": "!="
-  of ">": ">"
-  of "<": "<"
-  of ">=": ">="
-  of "<=": "<="
-  else: opStr
 
 proc nimOpToWhereOp(opStr: string): NimNode {.compileTime.} =
   case opStr

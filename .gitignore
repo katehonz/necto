@@ -4,15 +4,22 @@ nimcache/
 *.dll
 *.so
 *.dylib
+*.out
 
 # Compiled binaries (no extension on Unix)
 tests/t_repo
 tests/debug_schema
 tests/test_schema_compile
+tests/t_integration
+tests/t_associations
 src/necto_migrate
 src/necto_rollback
 src/necto_status
 src/necto_gen_migration
+
+# Build artifacts
+src/necto/changeset/
+src/necto/migration/
 
 # Test outputs
 testresults/
@@ -27,4 +34,3 @@ testresults/
 # OS
 .DS_Store
 Thumbs.db
-tests/t_integration

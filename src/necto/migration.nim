@@ -6,11 +6,8 @@
 ## Пример:
 ##   necto_migration CreateUsers, "20260526120000":
 ##     up:
-##       createTable repo, "users", [
-##         pk("id"),
-##         col("name", "text", null = false),
-##         timestamps()
-##       ]
+##       createTable repo, "users", cols(pk("id"), col("name", "text", nullable = false))
+##         & timestamps()
 ##
 ##     down:
 ##       dropTable repo, "users"
@@ -91,6 +88,16 @@ proc timestamps*(): seq[ColumnDef] =
     col("created_at", "timestamp with time zone", nullable = false, default = "NOW()"),
     col("updated_at", "timestamp with time zone", nullable = false, default = "NOW()")
   ]
+
+proc cols*(defs: varargs[ColumnDef]): seq[ColumnDef] =
+  ## Helper to build column lists: cols(pk("id"), col("name", "text")).
+  result = @[]
+  for d in defs:
+    result.add(d)
+
+proc cols*(defs: seq[ColumnDef]): seq[ColumnDef] =
+  ## Overload that accepts a seq directly (e.g., from timestamps()).
+  result = defs
 
 # --- SQL генератори ---
 
@@ -210,11 +217,10 @@ proc modify*(repo: auto, tableName, colName, newDbType: string;
              nullable: bool = true, default: string = "") =
   ## Ecto-style: променя тип/конфигурация на колона.
   var parts = @["ALTER TABLE \"" & tableName & "\" ALTER COLUMN \"" & colName & "\" TYPE " & newDbType]
-  if not nullable and default.len > 0:
+  if default.len > 0:
     parts.add("ALTER TABLE \"" & tableName & "\" ALTER COLUMN \"" & colName & "\" SET DEFAULT " & default)
+  if not nullable:
     parts.add("ALTER TABLE \"" & tableName & "\" ALTER COLUMN \"" & colName & "\" SET NOT NULL")
-  elif default.len > 0:
-    parts.add("ALTER TABLE \"" & tableName & "\" ALTER COLUMN \"" & colName & "\" SET DEFAULT " & default)
   repo.exec(parts.join("; "))
 
 proc addConstraint*(repo: auto, tableName, constraintName, definition: string) =

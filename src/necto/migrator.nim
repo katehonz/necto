@@ -33,7 +33,7 @@ proc newMigrator*(repo: Repo, migrationsTable: string = "necto_schema_migrations
 proc bootstrap*(mig: Migrator) =
   ## Създава таблицата за миграции ако не съществува.
   mig.repo.exec("""
-    CREATE TABLE IF NOT EXISTS """ & mig.migrationsTable & """ (
+    CREATE TABLE IF NOT EXISTS """ & "\"" & mig.migrationsTable & "\"" & """ (
       version TEXT PRIMARY KEY,
       name TEXT NOT NULL,
       inserted_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
@@ -205,11 +205,8 @@ import necto/migration
 necto_migration """ & name & """, \"""" & timestamp & """\":
   up:
     # TODO: write your migration here
-    # createTable repo, "new_table", [
-    #   pk("id"),
-    #   col("name", "text", null = false),
-    #   timestamps()
-    # ]
+    # createTable repo, "new_table", cols(pk("id"), col("name", "text", nullable = false))
+    #   & timestamps()
     discard
 
   down:

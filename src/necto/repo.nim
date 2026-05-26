@@ -112,11 +112,9 @@ template one*[T](repo: Repo, q: Query[T]): Option[T] =
 
 template count*[T](repo: Repo, q: Query[T]): int64 =
   ## Връща брой редове.
-  mixin schemaMeta
   block:
     let conn = repo.getConn()
     try:
-      let meta = schemaMeta(T)
       var bq = q.toBoundQuery()
       # Заменяме SELECT ... с SELECT COUNT(*)
       let fromIdx = bq.sql.find(" FROM ")
@@ -375,7 +373,10 @@ proc transaction*(repo: Repo, body: proc()) =
     body()
     repo.adapter.commitTransaction(conn)
   except:
-    repo.adapter.rollbackTransaction(conn)
+    try:
+      repo.adapter.rollbackTransaction(conn)
+    except:
+      discard
     raise
   finally:
     threadLocalConn = prevConn
