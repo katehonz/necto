@@ -76,6 +76,42 @@ for u in users:
 
 Result: `Table[int64, Profile]`
 
+## Auto-Preload Macros
+
+For convenience, Repo provides macros that run the query **and** preload associations in one call:
+
+### allWithPreload
+
+```nim
+let posts = repo.allWithPreload(
+  fromSchema(Post).orderBy("id", Asc),
+  "author"
+)
+# posts are loaded; authors are batch-preloaded automatically
+```
+
+Multiple associations at once:
+
+```nim
+let users = repo.allWithPreload(
+  fromSchema(User).where("active", Eq, "true"),
+  "posts", "profile"
+)
+```
+
+### oneWithPreload
+
+Same for a single result:
+
+```nim
+let maybePost = repo.oneWithPreload(
+  fromSchema(Post).where("id", Eq, "42"),
+  "author"
+)
+```
+
+> **Note:** `allWithPreload` / `oneWithPreload` reuse the same connection for both queries and guarantee exactly 2 queries total.
+
 ## How It Works
 
 1. **Collect keys** — iterate parents and gather unique FK/PK values

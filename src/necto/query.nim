@@ -516,3 +516,17 @@ macro whereIt*(q: typed, expr: untyped): untyped =
   for c in clauses:
     chain = generateWhereCall(c, chain)
   result.add(chain)
+
+# --- Pipe operator for query pipelining (Elixir-style) ---
+
+macro `|>`*(left: untyped; right: untyped): untyped =
+  ## Pipe operator за query chaining.
+  ## Пример: User |> fromSchema |> where("age", Gte, "18") |> repo.all
+  if right.kind in {nnkCall, nnkCommand}:
+    result = right
+    result.insert(1, left)
+  elif right.kind == nnkInfix:
+    result = newCall(right, left)
+  else:
+    result = newCall(right, left)
+

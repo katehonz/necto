@@ -130,6 +130,27 @@ proc validateNumber*[T](cs: Changeset[T], field: string; greaterThan, lessThan: 
     except ValueError:
       result.addError(field, "is not a number")
 
+proc validateConfirmation*[T](cs: Changeset[T], field: string, confirmationField: string = ""): Changeset[T] =
+  ## Проверява дали полето съвпада с confirmation полето.
+  ## По подразбиране confirmationField е "{field}_confirmation".
+  result = cs
+  let confField = if confirmationField.len > 0: confirmationField else: field & "_confirmation"
+  if result.changes.hasKey(field):
+    let val = result.changes[field]
+    let confVal = if result.params.hasKey(confField): result.params[confField]
+                  elif result.changes.hasKey(confField): result.changes[confField]
+                  else: ""
+    if val != confVal:
+      result.addError(field, "doesn't match confirmation")
+
+proc validateExclusion*[T](cs: Changeset[T], field: string, forbidden: openArray[string]): Changeset[T] =
+  ## Проверява дали стойността НЕ е в списъка със забранени стойности.
+  result = cs
+  if result.changes.hasKey(field):
+    let val = result.changes[field]
+    if val in forbidden:
+      result.addError(field, "is reserved")
+
 # --- Constraints ---
 
 proc uniqueConstraint*[T](cs: Changeset[T], field: string, message: string = "has already been taken"): Changeset[T] =

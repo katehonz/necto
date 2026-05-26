@@ -23,6 +23,10 @@ task gen_migration, "Generate a new migration file":
 task migrate_status, "Show migration status":
   exec "nim c -r --path:src src/necto_status.nim"
 
+task gen_schema, "Generate schema from existing PostgreSQL table":
+  echo "Run directly: nim c -r --path:src src/necto_gen_schema.nim --table TABLE_NAME"
+  echo "Options: --table, --output, --module, --schema, --host, --port, --user, --password, --database"
+
 # --- Test tasks ---
 
 task test, "Run all test suites":

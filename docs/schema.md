@@ -104,6 +104,50 @@ necto_schema User:
   has_one profile: Profile
 ```
 
+## Reverse Schema Generation
+
+If you already have a PostgreSQL database, Necto can introspect it and generate the schema code for you.
+
+### CLI
+
+```bash
+nim c -r src/necto_gen_schema.nim \
+  --table=users \
+  --host=localhost \
+  --port=5432 \
+  --user=postgres \
+  --password=secret \
+  --database=my_app \
+  --output=src/models/user.nim
+```
+
+### Programmatic
+
+```nim
+import necto/schema_generator
+import db_connector/db_postgres
+
+let conn = open("localhost", "postgres", "secret", "my_app")
+let info = inspectTable(conn, "users")
+echo generateSchema(info, schemaName = "User")
+close(conn)
+```
+
+### Supported Type Mappings
+
+| PostgreSQL Type | Generated Nim Type |
+|-----------------|-------------------|
+| `bigint`, `bigserial` | `int64` |
+| `integer`, `serial` | `int` |
+| `text`, `varchar` | `string` |
+| `boolean` | `bool` |
+| `double precision` | `float` |
+| `timestamp with time zone` | `DateTime` |
+| `jsonb` | `JsonNode` |
+| any nullable column | `Option[T]` |
+
+`bigserial` / `serial` columns are detected automatically and marked with `{primary_key, auto_increment}`.
+
 ## Reflection
 
 ```nim

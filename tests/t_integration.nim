@@ -170,3 +170,97 @@ suite "Integration: Schema + Query + Changeset + CRUD":
     except ValidationError:
       raised = true
     check(raised)
+
+  test "insert_all batch inserts multiple records":
+    var css: seq[Changeset[User]] = @[]
+    for name in @["Batch1", "Batch2", "Batch3"]:
+      var cs = newChangeset(newUser(), {"name": name, "email": name.toLowerAscii() & "@test.com", "age": $(name.len * 5)}.toTable)
+      cs = cs.castFields(@["name", "email", "age"])
+      css.add(cs)
+
+    let users = testrepoInstance.insert_all(css)
+    check(users.len == 3)
+    check(users[0].name == "Batch1")
+    check(users[1].name == "Batch2")
+    check(users[2].name == "Batch3")
+    check(users[0].id > 0)
+    check(users[1].id > 0)
+    check(users[2].id > 0)
+
+    let allUsers = testrepoInstance.all(fromSchema(User).orderBy("id", Asc))
+    check(allUsers.len == 3)
+    check(allUsers[0].email == "batch1@test.com")
+    check(allUsers[1].age == 30)  # "Batch2".len * 5 = 6 * 5 = 30
+
+  test "insert_all with empty seq returns empty":
+    let empty: seq[Changeset[User]] = @[]
+    let users = testrepoInstance.insert_all(empty)
+    check(users.len == 0)
+
+  test "update_all updates matching records":
+    for name in @["A", "B", "C"]:
+      var cs = newChangeset(newUser(), {"name": name, "active": "true"}.toTable)
+      cs = cs.castFields(@["name"])
+      discard testrepoInstance.insert(cs)
+
+    let updated = testrepoInstance.update_all(
+      fromSchema(User).where("name", Eq, "A"),
+      {"name": "Alpha"}.toTable
+    )
+    check(updated == 1)
+
+    let found = testrepoInstance.one(fromSchema(User).where("name", Eq, "Alpha"))
+    check(found.isSome)
+
+  test "delete_all deletes matching records":
+    for name in @["Del1", "Del2", "Del3"]:
+      var cs = newChangeset(newUser(), {"name": name}.toTable)
+      cs = cs.castFields(@["name"])
+      discard testrepoInstance.insert(cs)
+
+    let deleted = testrepoInstance.delete_all(
+      fromSchema(User).where("name", Eq, "Del2")
+    )
+    check(deleted == 1)
+
+    let remaining = testrepoInstance.all(fromSchema(User).where("name", Eq, "Del2"))
+    check(remaining.len == 0)
+
+  test "validateConfirmation catches mismatch":
+    var cs = newChangeset(newUser(), {"password": "secret", "password_confirmation": "wrong"}.toTable)
+    cs = cs.castFields(@["password"])
+    cs = cs.validateConfirmation("password")
+    check(cs.isInvalid)
+    check(cs.getError("password")[0] == "doesn't match confirmation")
+
+  test "validateConfirmation passes on match":
+    var cs = newChangeset(newUser(), {"password": "secret", "password_confirmation": "secret"}.toTable)
+    cs = cs.castFields(@["password"])
+    cs = cs.validateConfirmation("password")
+    check(cs.isValid)
+
+  test "validateExclusion catches reserved values":
+    var cs = newChangeset(newUser(), {"name": "admin"}.toTable)
+    cs = cs.castFields(@["name"])
+    cs = cs.validateExclusion("name", @["admin", "root", "system"])
+    check(cs.isInvalid)
+    check(cs.getError("name")[0] == "is reserved")
+
+  test "validateExclusion passes on allowed values":
+    var cs = newChangeset(newUser(), {"name": "Ivan"}.toTable)
+    cs = cs.castFields(@["name"])
+    cs = cs.validateExclusion("name", @["admin", "root", "system"])
+    check(cs.isValid)
+
+  test "Pipe operator |> works for query chaining":
+    for name in @["PipeA", "PipeB", "PipeC"]:
+      var cs = newChangeset(newUser(), {"name": name}.toTable)
+      cs = cs.castFields(@["name"])
+      discard testrepoInstance.insert(cs)
+
+    let found = User |> fromSchema |> where("name", Eq, "PipeB") |> testrepoInstance.one
+    check(found.isSome)
+    check(found.get().name == "PipeB")
+
+    let all = User |> fromSchema |> testrepoInstance.all
+    check(all.len >= 3)

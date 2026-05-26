@@ -52,6 +52,22 @@ cs = cs.validateLength("name", min = 2, max = 100)
 cs = cs.validateNumber("age", greaterThan = 0, lessThan = 150)
 ```
 
+### validateConfirmation
+
+Checks that two fields match (e.g. password confirmation):
+
+```nim
+cs = cs.validateConfirmation("password", "password_confirmation")
+```
+
+### validateExclusion
+
+Ensures a field is not in a forbidden list:
+
+```nim
+cs = cs.validateExclusion("username", @["admin", "root", "system"])
+```
+
 ## Checking Validity
 
 ```nim
@@ -69,6 +85,35 @@ Repo bang methods (`insert!`, `update!`, `delete!`) raise `ValidationError` if t
 ```nim
 let user = repo.insert!(cs)  # raises if cs.isInvalid
 ```
+
+## Change Management
+
+Beyond `castFields`, you can manipulate changes directly:
+
+```nim
+cs = cs.putChange("role", "admin")      # add/replace a change
+cs = cs.forceChange("updated_at", now)  # bypass cast whitelist
+cs = cs.deleteChange("temp_field")      # remove a change
+```
+
+Inspect changes:
+
+```nim
+echo cs.hasChange("name")      # true
+echo cs.changedFields()        # @["name", "email"]
+for field, value in cs.changes:
+  echo field, " = ", value
+```
+
+Apply changes to the data object without writing to the database:
+
+```nim
+let updatedUser = cs.applyChanges()
+```
+
+## Batch Validation
+
+When using `insert_all`, every changeset is validated before the batch query runs. If any changeset is invalid, `ValidationError` is raised immediately.
 
 ## Custom Validations
 

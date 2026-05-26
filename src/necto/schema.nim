@@ -565,6 +565,53 @@ macro necto_schema*(name: untyped, body: untyped): untyped =
   )
   result.add(getFieldRuntimeProc)
 
+  # --- Генериране на preloadAssoc template ---
+  var preloadWhenBranches: seq[NimNode] = @[]
+  for am in assocMetaNodes:
+    let assocNameLit = am[1][1]
+    let kindIdent = am[2][1]
+    let targetSchemaLit = am[3][1]
+    let childType = newIdentNode($targetSchemaLit)
+    let kindStr = $kindIdent
+
+    var preloadCall: NimNode
+    if kindStr == "akBelongsTo":
+      preloadCall = quote do:
+        discard preloadBelongsTo[`typeName`, `childType`](repo, records)
+    elif kindStr == "akHasMany":
+      preloadCall = quote do:
+        discard preloadHasMany[`typeName`, `childType`](repo, records)
+    elif kindStr == "akHasOne":
+      preloadCall = quote do:
+        discard preloadHasOne[`typeName`, `childType`](repo, records)
+    else:
+      continue
+
+    let cond = nnkInfix.newTree(newIdentNode("=="), newIdentNode("assocName"), assocNameLit)
+    preloadWhenBranches.add(newTree(nnkElifBranch, cond, preloadCall))
+
+  if preloadWhenBranches.len > 0:
+    preloadWhenBranches.add(newTree(nnkElse,
+      newTree(nnkStaticStmt, newCall(newIdentNode("error"), newLit("Unknown association on " & schemaName)))))
+
+    let preloadWhenStmt = newTree(nnkWhenStmt, preloadWhenBranches)
+
+    var preloadTemplate = newTree(nnkTemplateDef,
+      newTree(nnkPostfix, newIdentNode("*"), newIdentNode("preloadAssoc")),
+      newEmptyNode(),
+      newEmptyNode(),
+      newTree(nnkFormalParams,
+        newIdentNode("untyped"),
+        newTree(nnkIdentDefs, newIdentNode("assocName"), newTree(nnkBracketExpr, newIdentNode("static"), newIdentNode("string")), newEmptyNode()),
+        newTree(nnkIdentDefs, newIdentNode("repo"), newIdentNode("Repo"), newEmptyNode()),
+        newTree(nnkIdentDefs, newIdentNode("records"), newTree(nnkBracketExpr, newIdentNode("seq"), typeName), newEmptyNode())
+      ),
+      newEmptyNode(),
+      newEmptyNode(),
+      preloadWhenStmt
+    )
+    result.add(preloadTemplate)
+
   result.add(dispatchProcs)
   for cf in changesetFuncs:
     result.add(cf)

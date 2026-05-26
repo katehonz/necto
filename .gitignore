@@ -12,10 +12,15 @@ tests/debug_schema
 tests/test_schema_compile
 tests/t_integration
 tests/t_associations
+tests/t_schema_generator
 src/necto_migrate
 src/necto_rollback
 src/necto_status
 src/necto_gen_migration
+src/necto_gen_schema
+src/necto/changeset
+src/necto/migration
+examples/friends/friends
 
 # Build artifacts
 src/necto/changeset/

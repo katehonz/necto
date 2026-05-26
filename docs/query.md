@@ -88,6 +88,21 @@ let total = repo.count(fromSchema(User))
 let active = repo.count(fromSchema(User).where("active", Eq, "true"))
 ```
 
+## Pipe Operator
+
+Necto supports Elixir-style piping for cleaner query chains:
+
+```nim
+let adults = User
+  |> fromSchema
+  |> where("age", Gte, "18")
+  |> orderBy("name", Asc)
+  |> limit(10)
+  |> repo.all
+```
+
+The `|>` macro simply inserts the left-hand side as the first argument of the right-hand call, so it works with any Necto API.
+
 ## SQL Injection Safety
 
 Necto never interpolates values into SQL strings. All values are passed as `$N` placeholders via `pqexecParams`:

@@ -127,6 +127,84 @@ template count*[T](repo: Repo, q: Query[T]): int64 =
     finally:
       repo.releaseConn(conn)
 
+# --- Auto-preload macros ---
+
+macro allWithPreload*(repoArg: Repo, qArg: typed, preloads: varargs[string]): untyped =
+  ## Изпълнява SELECT и автоматично preload-ва асоциациите.
+  ## Пример: repo.allWithPreload(Query.fromSchema(Post), "author", "comments")
+  let qType = getTypeInst(qArg)
+  if qType.kind != nnkBracketExpr:
+    error("Expected Query[T], got " & repr(qType))
+
+  let repoIdent = newIdentNode("repo")
+  let resIdent = newIdentNode("res")
+
+  var preloadStmts = newStmtList()
+  for p in preloads:
+    let assocName = newLit($p)
+    preloadStmts.add(newCall(newIdentNode("preloadAssoc"), assocName, repoIdent, resIdent))
+
+  var blockBody = newStmtList()
+  blockBody.add(newTree(nnkLetSection, newTree(nnkIdentDefs, repoIdent, newEmptyNode(), repoArg)))
+  blockBody.add(newTree(nnkVarSection, newTree(nnkIdentDefs, resIdent, newEmptyNode(),
+    newCall(newTree(nnkDotExpr, repoIdent, newIdentNode("all")), qArg))))
+  blockBody.add(preloadStmts)
+  blockBody.add(resIdent)
+
+  result = newTree(nnkBlockStmt, newEmptyNode(), blockBody)
+
+macro oneWithPreload*(repoArg: Repo, qArg: typed, preloads: varargs[string]): untyped =
+  ## Връща един резултат с автоматичен preload.
+  let qType = getTypeInst(qArg)
+  if qType.kind != nnkBracketExpr:
+    error("Expected Query[T], got " & repr(qType))
+  let parentType = qType[1]
+
+  let repoIdent = newIdentNode("repo")
+  let resSeqIdent = newIdentNode("resSeq")
+  let maybeIdent = newIdentNode("maybe")
+
+  var preloadStmts = newStmtList()
+  for p in preloads:
+    let assocName = newLit($p)
+    preloadStmts.add(newCall(newIdentNode("preloadAssoc"), assocName, repoIdent, resSeqIdent))
+
+  var blockBody = newStmtList()
+  blockBody.add(newTree(nnkLetSection, newTree(nnkIdentDefs, repoIdent, newEmptyNode(), repoArg)))
+
+  # var q2 = q; q2 = q2.limit(1)
+  let q2Ident = newIdentNode("q2")
+  blockBody.add(newTree(nnkVarSection, newTree(nnkIdentDefs, q2Ident, newEmptyNode(), qArg)))
+  blockBody.add(newTree(nnkAsgn,
+    newTree(nnkDotExpr, q2Ident, newIdentNode("limit")),
+    newLit(1)))
+
+  # var resSeq: seq[ParentType] = @[]
+  blockBody.add(newTree(nnkVarSection, newTree(nnkIdentDefs, resSeqIdent,
+    newTree(nnkBracketExpr, newIdentNode("seq"), parentType),
+    newCall(newIdentNode("@"), newTree(nnkBracket)))))
+
+  # let maybe = repo.one(q2)
+  blockBody.add(newTree(nnkLetSection, newTree(nnkIdentDefs, maybeIdent, newEmptyNode(),
+    newCall(newTree(nnkDotExpr, repoIdent, newIdentNode("one")), q2Ident))))
+
+  # if maybe.isSome: resSeq.add(maybe.get); preloadStmts; some(resSeq[0]) else: none(ParentType)
+  var ifBody = newStmtList()
+  ifBody.add(newCall(newTree(nnkDotExpr, resSeqIdent, newIdentNode("add")),
+    newTree(nnkDotExpr, maybeIdent, newIdentNode("get"))))
+  ifBody.add(preloadStmts)
+  ifBody.add(newCall(newIdentNode("some"), newTree(nnkBracketExpr, resSeqIdent, newLit(0))))
+
+  let elseBody = newCall(newIdentNode("none"), parentType)
+
+  blockBody.add(newTree(nnkIfStmt,
+    newTree(nnkElifBranch,
+      newTree(nnkDotExpr, maybeIdent, newIdentNode("isSome")),
+      ifBody),
+    newTree(nnkElse, elseBody)))
+
+  result = newTree(nnkBlockStmt, newEmptyNode(), blockBody)
+
 # --- Write Helpers (вземат SchemaMeta като параметър; cs е auto за избягване на generic bound) ---
 
 proc buildInsertSql(cs: auto, meta: SchemaMeta): (string, seq[string]) =
@@ -292,6 +370,183 @@ template insert*[T](repo: Repo, cs: Changeset[T]): T =
         ce.constraintName = ""
         raise ce
       raise
+    finally:
+      repo.releaseConn(conn)
+
+template insert_all*(repo: Repo, changesets: auto): auto =
+  ## Batch insert на множество changesets.
+  ## Връща seq от заредените записи (чрез RETURNING *).
+  ## Всички changesets трябва да са cast-нати с еднакви полета.
+  mixin schemaMeta, load
+  block:
+    if changesets.len == 0:
+      @[]
+    else:
+      type ItemType = typeof(changesets[0].data)
+      # Проверка за невалидни changesets
+      for cs in changesets:
+        if cs.isInvalid():
+          raise newException(ValidationError, "Cannot insert invalid changeset in batch")
+      let conn = repo.getConn()
+      try:
+        let meta = schemaMeta(ItemType)
+
+        # --- Build batch INSERT SQL inline ---
+        var columns: seq[string] = @[]
+        var allValues: seq[string] = @[]
+        var idx = 1
+
+        let firstCs = changesets[0]
+        for key, val in firstCs.changes.pairs():
+          var fieldKnown = false
+          var f: FieldMeta
+          for fm in meta.fields:
+            if fm.name == key:
+              f = fm
+              fieldKnown = true
+              break
+          if not fieldKnown or f.virtual:
+            continue
+          columns.add("\"" & f.dbColumn & "\"")
+
+        var timestampCols: seq[FieldMeta] = @[]
+        for f in meta.fields:
+          if f.isTimestamp and not firstCs.changes.hasKey(f.name):
+            timestampCols.add(f)
+            columns.add("\"" & f.dbColumn & "\"")
+
+        var rowGroups: seq[string] = @[]
+        for cs in changesets:
+          var rowPlaceholders: seq[string] = @[]
+          for key, val in cs.changes.pairs():
+            var fieldKnown = false
+            for f in meta.fields:
+              if f.name == key:
+                fieldKnown = true
+                break
+            if not fieldKnown:
+              continue
+            rowPlaceholders.add("$" & $idx)
+            allValues.add(val)
+            inc idx
+          for f in timestampCols:
+            rowPlaceholders.add("$" & $idx)
+            allValues.add(dumpValue(now()))
+            inc idx
+          rowGroups.add("(" & rowPlaceholders.join(", ") & ")")
+
+        let sql = "INSERT INTO \"" & meta.tableName & "\" (" &
+                  columns.join(", ") & ") VALUES " &
+                  rowGroups.join(", ") & " RETURNING *"
+        # --------------------------------------
+
+        let rows = repo.adapter.query(conn, sql, allValues)
+        var res: seq[ItemType] = @[]
+        for row in rows:
+          res.add(load(row, ItemType))
+        res
+      except DatabaseError as e:
+        var ce = new(ConstraintError)
+        ce.msg = e.msg
+        ce.constraintName = ""
+        raise ce
+      finally:
+        repo.releaseConn(conn)
+
+proc renumberPlaceholders(sql: string, offset: int): string =
+  ## Преименува $N placeholders с offset.
+  ## Пример: renumberPlaceholders("WHERE x = $1 AND y = $2", 2) → "WHERE x = $3 AND y = $4"
+  result = sql
+  var i = result.len - 1
+  while i >= 0:
+    if result[i] == '$':
+      var j = i + 1
+      var num = 0
+      while j < result.len and result[j] in {'0'..'9'}:
+        num = num * 10 + (result[j].ord - '0'.ord)
+        inc j
+      if num > 0:
+        let newNum = num + offset
+        result = result[0..<i] & "$" & $newNum & result[j..^1]
+    dec i
+
+template update_all*[T](repo: Repo, q: Query[T], changes: Table[string, string]): int64 =
+  ## Batch update на записи отговарящи на Query.
+  ## Връща брой засегнати редове.
+  ## Пример: repo.update_all(Query.fromSchema(User).where("active", Eq, "false"), {"active": "true"}.toTable)
+  mixin schemaMeta
+  block:
+    let conn = repo.getConn()
+    try:
+      let meta = schemaMeta(T)
+      var sets: seq[string] = @[]
+      var values: seq[string] = @[]
+      var idx = 1
+
+      for key, val in changes.pairs():
+        var f: FieldMeta
+        var found = false
+        for fm in meta.fields:
+          if fm.name == key:
+            f = fm
+            found = true
+            break
+        if not found or f.virtual or f.primaryKey:
+          continue
+        sets.add("\"" & f.dbColumn & "\" = $" & $idx)
+        values.add(val)
+        inc idx
+
+      # Автоматичен updated_at
+      for f in meta.fields:
+        if f.isTimestamp and f.name == "updated_at":
+          sets.add("\"" & f.dbColumn & "\" = $" & $idx)
+          values.add(dumpValue(now()))
+          inc idx
+          break
+
+      let bq = q.toBoundQuery()
+      # Заменяме SELECT ... с UPDATE ... SET ... WHERE ...
+      let fromIdx = bq.sql.find(" FROM ")
+      let whereIdx = bq.sql.find(" WHERE ")
+      var tablePart = if fromIdx >= 0: bq.sql[fromIdx + 6 ..< (if whereIdx >= 0: whereIdx else: bq.sql.len)] else: meta.tableName
+      if tablePart.startsWith("\"") and tablePart.endsWith("\""):
+        tablePart = tablePart[1 ..< tablePart.len - 1]
+      
+      var sql = "UPDATE \"" & tablePart & "\" SET " & sets.join(", ")
+      if whereIdx >= 0:
+        let whereSql = renumberPlaceholders(bq.sql[whereIdx..^1], idx - 1)
+        sql.add(" " & whereSql)
+        for a in bq.args:
+          values.add(a)
+      
+      repo.adapter.execAffected(conn, sql, values)
+    finally:
+      repo.releaseConn(conn)
+
+template delete_all*[T](repo: Repo, q: Query[T]): int64 =
+  ## Изтрива всички записи отговарящи на Query.
+  ## Връща брой изтрити редове.
+  ## Пример: repo.delete_all(fromSchema(User).where("active", Eq, "false"))
+  mixin schemaMeta
+  block:
+    let conn = repo.getConn()
+    try:
+      let meta = schemaMeta(T)
+      let bq = q.toBoundQuery()
+      let fromIdx = bq.sql.find(" FROM ")
+      let whereIdx = bq.sql.find(" WHERE ")
+      var tablePart = if fromIdx >= 0: bq.sql[fromIdx + 6 ..< (if whereIdx >= 0: whereIdx else: bq.sql.len)] else: meta.tableName
+      if tablePart.startsWith("\"") and tablePart.endsWith("\""):
+        tablePart = tablePart[1 ..< tablePart.len - 1]
+      
+      var sql = "DELETE FROM \"" & tablePart & "\""
+      var args: seq[string] = @[]
+      if whereIdx >= 0:
+        sql.add(" " & bq.sql[whereIdx..^1])
+        args = bq.args
+      
+      repo.adapter.execAffected(conn, sql, args)
     finally:
       repo.releaseConn(conn)
 

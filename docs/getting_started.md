@@ -161,12 +161,27 @@ let updated = repo.update!(cs2)
 var cs3 = newChangeset(updated, initTable[string, string]())
 cs3.changes["id"] = $updated.id
 repo.delete!(cs3)
+
+# Batch insert
+var css: seq[Changeset[User]] = @[]
+for name in @["Alice", "Bob", "Charlie"]:
+  var c = newChangeset(newUser(), {"name": name}.toTable)
+  c = c.castFields(@["name"])
+  css.add(c)
+let newUsers = repo.insert_all(css)
+
+# Pipe syntax
+let adults = User
+  |> fromSchema
+  |> where("age", Gte, "18")
+  |> orderBy("name", Asc)
+  |> repo.all
 ```
 
 ## 5. Next Steps
 
-- [Schema](./schema.md) — fields, types, associations, timestamps
-- [Query DSL](./query.md) — where, orderBy, limit, count
-- [Changesets](./changeset.md) — cast, validations, constraints
-- [Associations & Preload](./associations.md) — belongs_to, has_many, N+1 safe loading
+- [Schema](./schema.md) — fields, types, associations, timestamps, reverse generation
+- [Query DSL](./query.md) — where, orderBy, limit, count, pipe operator
+- [Changesets](./changeset.md) — cast, validations, constraints, batch validation
+- [Associations & Preload](./associations.md) — belongs_to, has_many, N+1 safe loading, auto-preload
 - [Migrations](./migrations.md) — DSL, versioning, rollback

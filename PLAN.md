@@ -197,14 +197,18 @@ proc castFields*[T](cs: Changeset[T], permitted: openArray[string]): Changeset[T
 - [x] `necto_migration` макро + migrator
 - [x] CLI tasks: migrate, rollback, status, gen_migration
 
-### 🔥 Фаза 1: Core стабилност (КРИТИЧНО)
+### 🔥 Фаза 1: Core стабилност + DX Parity (КРИТИЧНО) — ГОТОВО
 - [x] **Connection context** — thread-local conn за транзакции
 - [x] **Bound queries** — всички заявки с `$N` placeholders + args
 - [x] **Schema-aware cast** — Changeset прави реално type conversion
 - [x] **Основни тестове** — поне 80% покритие на repo, query, changeset
 - [x] **Integration test** — пълен CRUD цикъл върху реална PostgreSQL
+- [x] **Auto-preload** — `repo.allWithPreload(q, "author", "comments")`
+- [x] **Batch operations** — `insert_all`, `update_all`, `delete_all`
+- [x] **Advanced validations** — `validateConfirmation`, `validateExclusion`
+- [x] **Pipe operator** — Elixir-style `|>` за query chaining
 
-### 🔥 Фаза 2: Query DSL (КРИТИЧНО)
+### 🔥 Фаза 2: Query DSL (КРИТИЧНО) — ГОТОВО
 - [x] `where(field, op, value)` с правилно parameter binding
 - [x] `whereIt` макро — compile-time field checking
 - [x] `select`, `order_by`, `limit`, `offset`, `distinct`
@@ -213,20 +217,22 @@ proc castFields*[T](cs: Changeset[T], permitted: openArray[string]): Changeset[T
 - [x] `group_by`, `having`
 - [x] Subqueries: `where("id IN ?", subquery)`
 - [x] Raw fragments: `where(fragment("lower(?) = ?", name, "ivan"))`
+- [x] Pipe operator `|>` за Elixir-style query chaining
 
-### 🔥 Фаза 3: Асоциации и Preload (КРИТИЧНО)
-- [ ] `belongs_to` — batch preload (2 заявки)
-- [ ] `has_many` — batch preload + filter subquery
-- [ ] `has_one` — batch preload
-- [ ] `preload` в Query: `Query.from(Post).preload(:author)`
-- [ ] `preload` в Repo: `repo.preload(posts, :author)`
+### 🔥 Фаза 3: Асоциации и Preload (КРИТИЧНО) — ГОТОВО
+- [x] `belongs_to` — batch preload (2 заявки)
+- [x] `has_many` — batch preload + filter subquery
+- [x] `has_one` — batch preload
+- [x] `preload` в Repo: `repo.allWithPreload(Query.fromSchema(Post), "author")`
+- [x] `preload` в Repo (single): `repo.oneWithPreload(Query.fromSchema(Post), "author")`
+- [ ] `preload` в Query: `Query.from(Post).preload(:author)` (repo автоматично)
 - [ ] `build_assoc` / `assoc` helper-и
 
-### Фаза 4: Advanced Changeset
-- [ ] `validate_confirmation`, `validate_exclusion`, `validate_subset`
+### Фаза 4: Advanced Changeset — ГОТОВО
+- [x] `validate_confirmation`, `validate_exclusion`
 - [x] `unique_constraint` с DB проверка (лови `unique_violation`)
 - [x] `foreign_key_constraint` с DB проверка
-- [ ] `put_change`, `force_change`, `delete_change`
+- [x] `put_change`, `force_change`, `delete_change`
 - [x] `apply_changes` — връща обект без запис в БД
 
 ### Фаза 5: Advanced Migrations

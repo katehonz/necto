@@ -32,6 +32,10 @@ The Crystal community built **Avram** — an Ecto-like ORM that made the languag
 | Composable queries | ✅ | ❌ | ⚠️ |
 | Changeset validations | ✅ | ❌ | ⚠️ |
 | Type-safe preload | ✅ | ❌ | ❌ |
+| Auto-preload macros | ✅ | ❌ | ❌ |
+| Batch insert/update/delete | ✅ | ❌ | ✅ |
+| Pipe operator (Elixir-style) | ✅ | ❌ | ❌ |
+| Reverse schema generation | ✅ | ❌ | ❌ |
 | Lazy loading | ❌ *(by design)* | ✅ | ✅ |
 
 **Necto does not do lazy loading.** You always know when and how queries run.
@@ -150,6 +154,33 @@ let updated = repo.update!(cs2)
 var cs3 = newChangeset(updated, initTable[string, string]())
 cs3.changes["id"] = $updated.id
 repo.delete!(cs3)
+
+# Batch insert
+var css: seq[Changeset[User]] = @[]
+for name in @["Alice", "Bob", "Charlie"]:
+  var cs = newChangeset(newUser(), {"name": name}.toTable)
+  cs = cs.castFields(@["name"])
+  css.add(cs)
+let users = repo.insert_all(css)  # Single batch query, RETURNING *
+
+# Batch update
+let updated = repo.update_all(
+  fromSchema(User).where("active", Eq, "false"),
+  {"active": "true"}.toTable
+)
+
+# Batch delete
+let deleted = repo.delete_all(
+  fromSchema(User).where("last_login", Lt, "2020-01-01")
+)
+
+# Pipe operator (Elixir-style)
+let adults = User
+  |> fromSchema
+  |> where("age", Gte, "18")
+  |> orderBy("name", Asc)
+  |> limit(10)
+  |> repo.all
 ```
 
 ### 5. Transactions
@@ -178,6 +209,19 @@ let posts = repo.all(fromSchema(Post).orderBy("id", Asc))
 let authors = preloadBelongsTo[Post, User](repo, posts)
 for p in posts:
   echo authors[p.author_id].name
+
+# Automatic preload (even more convenient)
+let postsWithAuthors = repo.allWithPreload(
+  fromSchema(Post).orderBy("id", Asc),
+  "author"
+)
+# Posts are loaded; authors are batch-preloaded automatically
+
+# Multiple associations at once
+let usersWithPosts = repo.allWithPreload(
+  fromSchema(User).where("active", Eq, "true"),
+  "posts", "profile"
+)
 ```
 
 ---
@@ -214,8 +258,8 @@ Bulgarian README: [README_BG.md](./README_BG.md)
 |---------|------|
 | **0.1.0** | ✅ Skeleton, schema, repo, adapter, migrations |
 | **0.2.0** | ✅ Type-safe query DSL, bound parameters, transaction context, preload |
-| **0.3.0** | Advanced changeset, constraints, aggregates |
-| **0.4.0** | Performance: prepared statements, batch insert, pool metrics |
+| **0.3.0** | ✅ Advanced changeset (confirmation, exclusion, change management), batch ops, pipe operator, auto-preload, reverse schema generation |
+| **0.4.0** | Performance: prepared statements, compiled query cache, pool metrics |
 | **1.0.0** | Async support, read replicas, production ready |
 
 ---
