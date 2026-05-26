@@ -2,19 +2,15 @@
 ##
 ## Cast, load и dump между Nim типове и PostgreSQL типове.
 ##
-## Потребителите могат да дефинират custom types чрез:
-##   proc dbType*(T: typedesc[MyType]): string = "varchar"
-##   proc castValue*(val: string, T: typedesc[MyType]): T = ...
-##   proc dumpValue*(val: MyType): string = ...
+## Потребителите могат да дефинират custom types чрез overload на:
+##   proc dbType*(T: typedesc[MyType]): string
+##   proc castValue*(val: string, T: typedesc[MyType]): T
+##   proc loadValue*(val: string, T: typedesc[MyType]): T
+##   proc dumpValue*(val: MyType): string
 
 import std/[strutils, options, json, times]
 
-type
-  NectoType*[T] = concept t
-    ## Концепт за тип, който може да се сериализира/десериализира.
-    ## За сега използваме overload-и на прокове, не чист концепт.
-
-# --- Built-in mappings ---
+# --- Built-in dbType mappings ---
 
 proc dbType*(T: typedesc[string]): string = "text"
 proc dbType*(T: typedesc[int]): string = "integer"
@@ -30,21 +26,69 @@ proc dbType*[T](OptT: typedesc[Option[T]]): string = dbType(T)
 
 proc castValue*(val: string, T: typedesc[string]): string = val
 proc castValue*(val: string, T: typedesc[int]): int = parseInt(val)
-proc castValue*(val: string, T: typedesc[int64]): int64 = parseInt(val)
+proc castValue*(val: string, T: typedesc[int64]): int64 = parseBiggestInt(val)
 proc castValue*(val: string, T: typedesc[float]): float = parseFloat(val)
 proc castValue*(val: string, T: typedesc[bool]): bool = parseBool(val)
 
-# TODO: DateTime, JsonNode, enum cast-ове
+proc castValue*(val: string, T: typedesc[DateTime]): DateTime =
+  ## Parse ISO 8601 datetime от низ.
+  try:
+    result = parse(val, "yyyy-MM-dd'T'HH:mm:ss'.'fffzzz")
+  except ValueError:
+    try:
+      result = parse(val, "yyyy-MM-dd HH:mm:ss")
+    except ValueError:
+      result = parse(val, "yyyy-MM-dd")
 
 # --- Load from DB row string ---
 
-proc loadValue*(val: string, T: typedesc[string]): string = val
-proc loadValue*(val: string, T: typedesc[int]): int = parseInt(val)
-proc loadValue*(val: string, T: typedesc[int64]): int64 = parseInt(val)
-proc loadValue*(val: string, T: typedesc[float]): float = parseFloat(val)
-proc loadValue*(val: string, T: typedesc[bool]): bool = val == "t" or val == "true" or val == "1"
+proc loadValue*(val: string, T: typedesc[string]): string =
+  ## Load стринг от БД (просто връща стойността).
+  val
 
-# TODO: DateTime, JsonNode, enum load-ове
+proc loadValue*(val: string, T: typedesc[int]): int =
+  if val.len == 0: 0 else: parseInt(val)
+
+proc loadValue*(val: string, T: typedesc[int64]): int64 =
+  if val.len == 0: 0'i64 else: parseBiggestInt(val)
+
+proc loadValue*(val: string, T: typedesc[float]): float =
+  if val.len == 0: 0.0 else: parseFloat(val)
+
+proc loadValue*(val: string, T: typedesc[bool]): bool =
+  val == "t" or val == "true" or val == "1" or val == "TRUE"
+
+proc loadValue*(val: string, T: typedesc[DateTime]): DateTime =
+  ## Load DateTime от PostgreSQL timestamp string.
+  if val.len == 0:
+    result = fromUnix(0).utc
+    return
+  # PostgreSQL връща формат: 2026-05-26 12:34:56.789+02
+  # или: 2026-05-26 12:34:56.789012+02
+  try:
+    result = parse(val, "yyyy-MM-dd HH:mm:ss'.'fffzzz")
+  except ValueError:
+    try:
+      result = parse(val, "yyyy-MM-dd HH:mm:ss'.'ffffffzzz")
+    except ValueError:
+      try:
+        result = parse(val, "yyyy-MM-dd HH:mm:sszzz")
+      except ValueError:
+        try:
+          result = parse(val, "yyyy-MM-dd HH:mm:ss")
+        except:
+          raise newException(ValueError, "Cannot load DateTime: " & val)
+
+proc loadValue*[T](val: string, OptT: typedesc[Option[T]]): Option[T] =
+  ## Load Option[T] — ако val е празен, връща none.
+  if val.len == 0:
+    none(T)
+  else:
+    some(loadValue(val, T))
+
+proc loadValue*[T](val: string, OptT: typedesc[seq[T]]): seq[T] =
+  ## Load PostgreSQL array. За сега placeholder.
+  @[]
 
 # --- Dump to DB string ---
 
@@ -54,4 +98,16 @@ proc dumpValue*(val: int64): string = $val
 proc dumpValue*(val: float): string = $val
 proc dumpValue*(val: bool): string = (if val: "true" else: "false")
 
-# TODO: DateTime, JsonNode, enum dump-ове
+proc dumpValue*(val: DateTime): string =
+  ## Format DateTime за PostgreSQL.
+  val.format("yyyy-MM-dd HH:mm:ss'.'fffzzz")
+
+proc dumpValue*[T](val: Option[T]): string =
+  if val.isSome:
+    dumpValue(val.get)
+  else:
+    ""
+
+proc dumpValue*[T](val: seq[T]): string =
+  ## Dump PostgreSQL array. За сега placeholder.
+  "{}"

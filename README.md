@@ -1,145 +1,297 @@
-# Necto — ORM за Nim, вдъхновен от Ecto (Elixir) и Avram (Crystal)
+# Necto 🍯
 
-> **Цел:** Да донесем на Nim общността модерна, type-safe и композируема абстракция за работа с релационни бази данни, която се учи от най-добрите практики на Ecto и Avram.
-
-## Защо Necto?
-
-Crystal общността мигрира към Avram (Ecto-подобен ORM) и спечели години разработка. Nim общността все още няма еквивалентен инструмент, който съчетава:
-
-- **Разделение на отговорностите** — Schema, Query, Changeset и Repo са отделни модули.
-- **Type-safe заявки** — грешките в заявките се хващат по време на компилация, където е възможно.
-- **Композируеми заявки** — можеш да вадиш части от заявки в отделни функции и да ги комбинираш.
-- **Явни асоциации** — няма скрито "lazy loading". Винаги знаеш кога и как се зареждат релациите.
-- **Мощен Changeset** — валидациите, cast-ването и проверката на ограниченията (constraints) са централизирани.
-
-## Архитектура (4+1 компонента)
-
-| Компонент | Отговорност | Ecto аналог | Avram аналог |
-|-----------|-------------|-------------|--------------|
-| `Repo` | Връзка с БД, пул от конекции, транзакции | `Ecto.Repo` | `Avram::Database` |
-| `Schema` | Дефиниция на таблици, полета, типове, релации | `Ecto.Schema` | `Avram::Model` |
-| `Query` | Композируем DSL за SELECT/UPDATE/DELETE | `Ecto.Query` | `Avram::Queryable` |
-| `Changeset` | Cast, валидация, проследяване на промени | `Ecto.Changeset` | `Avram::SaveOperation` |
-| `Migration` | Версиониране на схемата на БД | `Ecto.Migration` | `Avram::Migrator` |
-
-## Бърз старт (визия)
+> **PostgreSQL-first ORM за Nim 2.x**, вдъхновен от [Ecto](https://hexdocs.pm/ecto/Ecto.html) (Elixir) и [Avram](https://github.com/luckyframework/avram) (Crystal).
 
 ```nim
 import necto
 
-# 1. Дефинираме Repo
-necto_repo AppRepo:
-  adapter necto.PostgresAdapter
-  host "localhost"
-  user "postgres"
-  password "pas+123"
-  database "my_app"
-
-# 2. Дефинираме Schema
-necto_schema User:
-  table "users"
-  field name: string
-  field email: string
-  field age: int
-  timestamps                    # created_at, updated_at
-
-  changeset signup(params: Table[string, string]):
-    this
-      |> cast(params, @["name", "email", "age"])
-      |> validate_required(@["name", "email"])
-      |> validate_format(:email, r".+@.+")
-      |> validate_inclusion(:age, 18..100)
-      |> unique_constraint(:email)
-
-necto_schema Post:
-  table "posts"
-  field title: string
-  field body: string
-  belongs_to author: User
-  timestamps
-
-# 3. Заявки (композируеми)
-let adults = AppRepo.all(
+# Композируема, type-safe заявка
+let users = repo.all(
   Query.from(User)
-    .where(_.age >= 18)
-    .order_by(_.name.asc)
-    .limit(10)
+    .where("age >= ?", 18)
+    .order_by("name", Asc)
+    .preload(:posts)
 )
 
-# 4. Preload на асоциации
-let postsWithAuthors = AppRepo.all(
-  Query.from(Post)
-    .preload(:author)
-)
-
-# 5. Писане чрез Changeset
-let ch = User.signup(params)
-if ch.is_valid:
-  let user = AppRepo.insert!(ch)
-else:
-  echo ch.errors
-
-# 6. Транзакции
-AppRepo.transaction do:
-  let user = AppRepo.insert!(User.signup(params))
-  let post = AppRepo.insert!(Post.changeset(%{"title": "Hello", "body": "World", "author_id": $user.id}))
+# Changeset-driven писане
+let cs = User.signup(%{"name": "Ivan", "email": "ivan@test.com"})
+if cs.isValid:
+  let user = repo.insert!(cs)
 ```
 
-## Миграции
+---
 
-```nim
-# migrations/20260526120000_create_users.nim
-necto_migration CreateUsers, "20260526120000":
-  def up:
-    create table(:users) do |t|
-      t.primary_key :id, :bigserial
-      t.string :name, null: false
-      t.string :email, null: false, unique: true
-      t.integer :age
-      t.timestamps
-    end
+## Защо Necto?
 
-  def down:
-    drop table(:users)
+Crystal общността създаде **Avram** — Ecto-подобен ORM, който я направи продуктивна за уеб разработка години по-рано. Nim общността заслужава същото ниво на абстракция.
+
+| Функция | Necto | Norm | ActiveRecord |
+|---------|-------|------|--------------|
+| Repository Pattern | ✅ | ⚠️ | ❌ |
+| Композируеми заявки | ✅ | ❌ | ⚠️ |
+| Changeset валидации | ✅ | ❌ | ⚠️ |
+| Type-safe preload | ✅ | ❌ | ❌ |
+| Lazy loading | ❌ *(нарочно)* | ✅ | ✅ |
+| PostgreSQL arrays | ✅ | ❌ | ⚠️ |
+
+**Necto не прави lazy loading.** Винаги знаеш кога и как се изпълняват заявките.
+
+---
+
+## Архитектура
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│   Schema    │────▶│   Query     │────▶│    Repo     │
+│  (структура)│     │  (заявка)   │     │  (връзка)   │
+└─────────────┘     └─────────────┘     └──────┬──────┘
+       │                                       │
+       ▼                                       ▼
+┌─────────────┐                       ┌─────────────┐
+│  Changeset  │◀──────────────────────│   Adapter   │
+│ (валидация) │                       │  (postgres) │
+└─────────────┘                       └─────────────┘
 ```
 
-Стартиране:
-```bash
-nimble necto.migrate   # прилага миграциите
-nimble necto.rollback  # отменя последната
-nimble necto.gen.migration CreatePosts  # генерира нова миграция
-```
+| Компонент | Отговорност | Аналог |
+|-----------|-------------|--------|
+| **Schema** | Дефинира таблици, полета, типове, релации | Ecto.Schema |
+| **Query** | Композируем DSL за SELECT | Ecto.Query |
+| **Changeset** | Cast, валидация, проследяване на промени | Ecto.Changeset |
+| **Repo** | Връзка, пул, транзакции | Ecto.Repo |
+| **Migration** | Версиониране на схемата | Ecto.Migration |
+
+---
 
 ## Инсталация
 
-Добави в `myproject.nimble`:
-```
-requires "necto >= 0.1.0"
+```bash
+nimble install necto
 ```
 
-Или клонирай репото локално:
+Или локално:
+
 ```bash
 git clone https://github.com/nim-community/necto.git
 cd necto
 nimble develop
 ```
 
+### Изисквания
+
+- Nim >= 2.0.0
+- PostgreSQL >= 12
+- `db_connector` пакет (инсталира се автоматично)
+
+---
+
+## Бърз старт
+
+### 1. Дефинирай Repo
+
+```nim
+import necto
+import necto/adapters/postgres
+
+necto_repo AppRepo:
+  adapter PostgresAdapter
+  host "localhost"
+  port 5432
+  user "postgres"
+  password "pas+123"
+  database "my_app"
+  pool_size 10
+
+let repo = apprepoInstance
+```
+
+### 2. Дефинирай Schema
+
+```nim
+necto_schema User:
+  table "users"
+  field id: int64 {.primary_key, auto_increment.}
+  field name: string {.not_null.}
+  field email: string {.not_null, unique.}
+  field age: Option[int]
+  timestamps
+
+  changeset signup(params):
+    this
+      |> cast(params, @[name, email, age])
+      |> validate_required(@[name, email])
+      |> validate_format(email, re".+@.+")
+      |> unique_constraint(email)
+```
+
+### 3. Чети с Query
+
+```nim
+# Всички потребители
+let all = repo.all(Query.from(User))
+
+# Филтриране и сортиране
+let adults = repo.all(
+  Query.from(User)
+    .where("age >= ?", 18)
+    .order_by("name", Asc)
+    .limit(10)
+)
+
+# Един резултат
+let maybe = repo.one(Query.from(User).where("email = ?", "ivan@test.com"))
+
+# Брой
+let count = repo.count(Query.from(User).where("active = ?", true))
+```
+
+### 4. Пиши с Changeset
+
+```nim
+# INSERT
+let cs = User.signup(%{"name": "Ivan", "email": "ivan@test.com", "age": "30"})
+if cs.isValid:
+  let user = repo.insert!(cs)
+  echo "Created user: ", user.id
+else:
+  echo "Errors: ", cs.errors
+
+# UPDATE
+var cs = newChangeset(user, %{"name": "Ivan Petrov"})
+cs = cs.cast(@["name"])
+      .validate_required(@["name"])
+let updated = repo.update!(cs)
+
+# DELETE
+repo.delete!(user)
+```
+
+### 5. Транзакции
+
+```nim
+repo.transaction proc() =
+  let user = repo.insert!(User.signup(params))
+  let post = repo.insert!(Post.changeset(%{
+    "title": "Hello",
+    "author_id": $user.id
+  }))
+  # Ако има изключение — автоматичен ROLLBACK
+```
+
+### 6. Асоциации и Preload
+
+```nim
+necto_schema Post:
+  table "posts"
+  field id: int64 {.primary_key.}
+  field title: string
+  belongs_to author: User
+  has_many comments: Comment
+  timestamps
+
+# Зарежда постове + автори (2 заявки, N+1 безопасно)
+let posts = repo.all(
+  Query.from(Post).preload(:author)
+)
+
+# Зарежда постове + филтрирани коментари
+let posts = repo.all(
+  Query.from(Post).preload(:comments)
+)
+```
+
+---
+
+## Миграции
+
+### Създаване
+
+```bash
+nimble necto.gen.migration CreateUsers
+```
+
+### Писане
+
+```nim
+# migrations/m20260526120000_create_users.nim
+import necto
+import necto/migration
+
+necto_migration CreateUsers, "20260526120000":
+  up:
+    createTable repo, "users", [
+      pk("id"),
+      col("name", "text", nullable = false),
+      col("email", "text", nullable = false),
+      col("age", "integer"),
+      timestamps()
+    ]
+    createIndex repo, "users", @["email"], unique = true
+
+  down:
+    dropTable repo, "users"
+```
+
+### Регистрация
+
+Създай `migrations.nim` в корена:
+
+```nim
+# migrations.nim
+include migrations/m20260526120000_create_users
+include migrations/m20260526130000_create_posts
+```
+
+### Изпълнение
+
+```bash
+# Прилага всички pending миграции
+nimble necto.migrate
+
+# Прилага последните 2
+nimble necto.migrate --step 2
+
+# Rollback на последната
+nimble necto.rollback
+
+# Статус
+nimble necto.migrate_status
+```
+
+---
+
 ## Тестване
 
 Проектът използва локален PostgreSQL:
-- host: `localhost`
-- user: `postgres`
-- password: `pas+123`
-- database: `necto_test`
 
 ```bash
+# Създай тестова база
+PGPASSWORD='pas+123' psql -U postgres -c "CREATE DATABASE necto_test;"
+
+# Стартирай тестовете
 nimble test
 ```
 
+---
+
 ## Roadmap
 
-Виж [PLAN.md](./PLAN.md) за пълната архитектура и фази на разработка.
+| Версия | Цел |
+|--------|-----|
+| **0.1.0** | ✅ Скелет, schema, repo, adapter, миграции |
+| **0.2.0** | 🔥 Type-safe query DSL, bound parameters, transaction context, preload |
+| **0.3.0** | Advanced changeset, constraints, aggregates |
+| **0.4.0** | Performance: prepared statements, batch insert, pool metrics |
+| **1.0.0** | Async support, read replicas, production ready |
+
+Пълният план: [PLAN.md](./PLAN.md)
+
+---
 
 ## Лиценз
 
 MIT License — виж [LICENSE](LICENSE).
+
+---
+
+*Създадено с ❤️ от Nim общността. Вдъхновено от Ecto и Avram.*

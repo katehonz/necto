@@ -1,6 +1,11 @@
 ## Necto Errors
 ##
 ## Йерархия от изключения, използвани от Necto.
+## DatabaseError е дефиниран в adapters/base и се преекспортира.
+
+import ./adapters/base
+
+export DatabaseError
 
 type
   NectoError* = object of CatchableError
@@ -20,3 +25,6 @@ type
 
   MigrationError* = object of NectoError
     ## Вдигнато при проблем с миграция.
+
+  AdapterError* = object of NectoError
+    ## Вдигнато при грешка в адаптера (connect, disconnect).

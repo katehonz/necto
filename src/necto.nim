@@ -2,5 +2,5 @@
 ##
 ## Основен entry point. Импортира всички публични модули.
 
-import necto/[repo, schema, query, changeset, type_system, associations, errors]
-export repo, schema, query, changeset, type_system, associations, errors
+import necto/[repo, schema, query, changeset, type_system, associations, errors, migration, migrator]
+export repo, schema, query, changeset, type_system, associations, errors, migration, migrator

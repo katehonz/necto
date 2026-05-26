@@ -9,18 +9,24 @@
 ##     host "localhost"
 ##     database "my_app"
 ##     pool_size 10
+##
+## Употреба:
+##   AppRepo.all(Query.from(User).where("age", Gt, "18"))
+##   AppRepo.insert(userChangeset)
 
-import std/[macros, tables, options, sequtils, strutils]
+import std/[macros, options, strutils]
 import ./adapters/base
+import ./query
+import ./schema
+import ./changeset
 import ./errors
 
-export base, errors
+export base, query, schema, changeset, errors
 
-# --- Repo тип и публичен API (runtime част) ---
+# --- Repo тип и публичен API ---
 
 type
   RepoObj* = object of RootObj
-    ## Runtime състояние на Repo.
     adapter*: Adapter
 
   Repo* = ref RepoObj
@@ -28,54 +34,274 @@ type
 proc newRepo*(adapter: Adapter): Repo =
   Repo(adapter: adapter)
 
-# --- Query API (placeholder до Query модула) ---
+proc getConn(repo: Repo): Connection =
+  repo.adapter.connect()
 
-proc all*(repo: Repo, queryObj: auto): seq[auto] =
+proc releaseConn(repo: Repo, conn: Connection) =
+  repo.adapter.disconnect(conn)
+
+# --- Raw SQL API (procs — не зависят от schema) ---
+
+proc exec*(repo: Repo, sql: string, args: seq[string] = @[]) =
+  ## Изпълнява raw SQL (DDL/DML) през адаптера.
+  let conn = repo.getConn()
+  try:
+    repo.adapter.exec(conn, sql, args)
+  finally:
+    repo.releaseConn(conn)
+
+proc queryRaw*(repo: Repo, sql: string, args: seq[string] = @[]): seq[DbRow] =
+  ## Изпълнява raw SELECT и връща редовете.
+  let conn = repo.getConn()
+  try:
+    repo.adapter.query(conn, sql, args)
+  finally:
+    repo.releaseConn(conn)
+
+proc scalar*(repo: Repo, sql: string, args: seq[string] = @[]): string =
+  ## Изпълнява raw SQL и връща скаларна стойност.
+  let conn = repo.getConn()
+  try:
+    repo.adapter.scalar(conn, sql, args)
+  finally:
+    repo.releaseConn(conn)
+
+# --- Query API (templates за lazy resolution на load/schemaMeta) ---
+
+template all*[T](repo: Repo, q: Query[T]): seq[T] =
   ## Изпълнява SELECT заявка и връща seq от резултати.
-  # TODO: интеграция с Query Builder + Schema Loader
-  @[]
+  mixin load, schemaMeta
+  block:
+    let conn = repo.getConn()
+    try:
+      let sql = q.toSql()
+      let rows = repo.adapter.query(conn, sql, @[])
+      var res: seq[T] = @[]
+      for row in rows:
+        res.add(load(row, T))
+      res
+    finally:
+      repo.releaseConn(conn)
 
-proc one*(repo: Repo, queryObj: auto): Option[auto] =
+template one*[T](repo: Repo, q: Query[T]): Option[T] =
   ## Връща един резултат или none.
-  # TODO
-  none(typeof(auto))
+  mixin load
+  block:
+    let conn = repo.getConn()
+    try:
+      var q2 = q
+      q2 = q2.limit(1)
+      let sql = q2.toSql()
+      let rows = repo.adapter.query(conn, sql, @[])
+      if rows.len > 0:
+        some(load(rows[0], T))
+      else:
+        none(T)
+    finally:
+      repo.releaseConn(conn)
 
-proc count*(repo: Repo, queryObj: auto): int64 =
+template count*[T](repo: Repo, q: Query[T]): int64 =
   ## Връща брой редове.
-  # TODO
-  0'i64
+  mixin schemaMeta
+  block:
+    let conn = repo.getConn()
+    try:
+      var cq = q
+      cq.selectFields = @[]
+      let baseSql = cq.toSql()
+      let countSql = baseSql.replace("*", "COUNT(*)")
+      let val = repo.adapter.scalar(conn, countSql, @[])
+      if val.len > 0:
+        parseBiggestInt(val)
+      else:
+        0'i64
+    finally:
+      repo.releaseConn(conn)
 
-# --- Write API (placeholder до Changeset модула) ---
+# --- Write Helpers (вземат SchemaMeta като параметър; cs е auto за избягване на generic bound) ---
 
-proc insert*(repo: Repo, changeset: auto): auto =
+proc buildInsertSql(cs: auto, meta: SchemaMeta): (string, seq[string]) =
+  ## Генерира INSERT SQL от changeset и schema metadata.
+  var columns: seq[string] = @[]
+  var placeholders: seq[string] = @[]
+  var values: seq[string] = @[]
+  var idx = 1
+
+  for key, val in cs.changes.pairs():
+    var fieldKnown = false
+    for f in meta.fields:
+      if f.name == key:
+        fieldKnown = true
+        break
+    if not fieldKnown:
+      continue
+    var f: FieldMeta
+    for fm in meta.fields:
+      if fm.name == key:
+        f = fm
+        break
+    if f.virtual:
+      continue
+    columns.add("\"" & f.dbColumn & "\"")
+    placeholders.add("$" & $idx)
+    values.add(val)
+    inc idx
+
+  for f in meta.fields:
+    if f.isTimestamp and not cs.changes.hasKey(f.name):
+      let nowStr = dumpValue(now())
+      columns.add("\"" & f.dbColumn & "\"")
+      placeholders.add("$" & $idx)
+      values.add(nowStr)
+      inc idx
+
+  let sql = "INSERT INTO \"" & meta.tableName & "\" (" &
+            columns.join(", ") & ") VALUES (" & placeholders.join(", ") & ")"
+  result = (sql, values)
+
+proc buildUpdateSql(cs: auto, meta: SchemaMeta): (string, seq[string]) =
+  ## Генерира UPDATE SQL от changeset и schema metadata.
+  var sets: seq[string] = @[]
+  var values: seq[string] = @[]
+  var idx = 1
+
+  for key, val in cs.changes.pairs():
+    var f: FieldMeta
+    var found = false
+    for fm in meta.fields:
+      if fm.name == key:
+        f = fm
+        found = true
+        break
+    if not found or f.virtual or f.primaryKey:
+      continue
+    sets.add("\"" & f.dbColumn & "\" = $" & $idx)
+    values.add(val)
+    inc idx
+
+  for f in meta.fields:
+    if f.isTimestamp and f.name == "updated_at" and not cs.changes.hasKey(f.name):
+      let nowStr = dumpValue(now())
+      sets.add("\"" & f.dbColumn & "\" = $" & $idx)
+      values.add(nowStr)
+      inc idx
+
+  var pkVal: string = ""
+  for f in meta.fields:
+    if f.primaryKey:
+      if cs.changes.hasKey(f.name):
+        pkVal = cs.changes[f.name]
+      break
+
+  if pkVal.len == 0:
+    raise newException(ValidationError, "Cannot update without primary key value")
+
+  values.add(pkVal)
+  let whereClause = "\"" & meta.primaryKeyField & "\" = $" & $idx
+
+  let sql = "UPDATE \"" & meta.tableName & "\" SET " &
+            sets.join(", ") & " WHERE " & whereClause
+  result = (sql, values)
+
+proc buildDeleteSql(cs: auto, meta: SchemaMeta): (string, seq[string]) =
+  ## Генерира DELETE SQL от changeset и schema metadata.
+  var pkVal: string = ""
+  for f in meta.fields:
+    if f.primaryKey:
+      if cs.changes.hasKey(f.name):
+        pkVal = cs.changes[f.name]
+      break
+
+  if pkVal.len == 0:
+    raise newException(ValidationError, "Cannot delete without primary key value")
+
+  let sql = "DELETE FROM \"" & meta.tableName & "\" WHERE \"" &
+            meta.primaryKeyField & "\" = $1"
+  result = (sql, @[pkVal])
+
+# --- Write API (templates) ---
+
+template insert*[T](repo: Repo, cs: Changeset[T]): T =
   ## Вмъква запис от changeset.
-  # TODO
-  changeset.data
+  mixin schemaMeta, load
+  block:
+    if cs.isInvalid():
+      raise newException(ValidationError, "Cannot insert invalid changeset")
+    let conn = repo.getConn()
+    try:
+      let meta = schemaMeta(T)
+      let (sql, args) = buildInsertSql(cs, meta)
+      let newId = repo.adapter.insertReturning(conn, sql, meta.primaryKeyField, args)
+      let loadSql = "SELECT * FROM \"" & meta.tableName &
+                    "\" WHERE \"" & meta.primaryKeyField & "\" = $1"
+      let rows = repo.adapter.query(conn, loadSql, @[$newId])
+      if rows.len > 0:
+        load(rows[0], T)
+      else:
+        cs.data
+    finally:
+      repo.releaseConn(conn)
 
-proc `insert!`*[T](repo: Repo, changeset: T): T =
-  ## Вмъква запис или вдига ValidationError.
-  result = repo.insert(changeset)
-  # TODO: проверка за валидност
+template update*[T](repo: Repo, cs: Changeset[T]): T =
+  ## Актуализира запис от changeset.
+  mixin schemaMeta, load
+  block:
+    if cs.isInvalid():
+      raise newException(ValidationError, "Cannot update invalid changeset")
+    let conn = repo.getConn()
+    try:
+      let meta = schemaMeta(T)
+      let (sql, args) = buildUpdateSql(cs, meta)
+      repo.adapter.exec(conn, sql, args)
+      var pkVal: string = ""
+      for f in meta.fields:
+        if f.primaryKey:
+          if cs.changes.hasKey(f.name):
+            pkVal = cs.changes[f.name]
+          break
+      let loadSql = "SELECT * FROM \"" & meta.tableName &
+                    "\" WHERE \"" & meta.primaryKeyField & "\" = $1"
+      let rows = repo.adapter.query(conn, loadSql, @[pkVal])
+      if rows.len > 0:
+        load(rows[0], T)
+      else:
+        cs.data
+    finally:
+      repo.releaseConn(conn)
 
-proc update*(repo: Repo, changeset: auto): auto =
-  ## Актуализира запис.
-  changeset.data
+template delete*[T](repo: Repo, cs: Changeset[T]): T =
+  ## Изтрива запис от changeset.
+  mixin schemaMeta
+  block:
+    let conn = repo.getConn()
+    try:
+      let meta = schemaMeta(T)
+      let (sql, args) = buildDeleteSql(cs, meta)
+      repo.adapter.exec(conn, sql, args)
+      cs.data
+    finally:
+      repo.releaseConn(conn)
 
-proc `update!`*[T](repo: Repo, changeset: T): T =
-  result = repo.update(changeset)
+# --- Bang версии (вдигат грешка) ---
 
-proc delete*(repo: Repo, changeset: auto): auto =
-  ## Изтрива запис.
-  changeset.data
+proc `insert!`*[T](repo: Repo, cs: Changeset[T]): T =
+  if cs.isInvalid():
+    raise newException(ValidationError, "Changeset is invalid")
+  result = repo.insert(cs)
 
-proc `delete!`*[T](repo: Repo, changeset: T): T =
-  result = repo.delete(changeset)
+proc `update!`*[T](repo: Repo, cs: Changeset[T]): T =
+  if cs.isInvalid():
+    raise newException(ValidationError, "Changeset is invalid")
+  result = repo.update(cs)
+
+proc `delete!`*[T](repo: Repo, cs: Changeset[T]): T =
+  result = repo.delete(cs)
 
 # --- Transaction API ---
 
 proc transaction*(repo: Repo, body: proc()) =
   ## Изпълнява блок в транзакция.
-  let conn = repo.adapter.connect()
+  let conn = repo.getConn()
   try:
     repo.adapter.beginTransaction(conn)
     body()
@@ -87,21 +313,15 @@ proc transaction*(repo: Repo, body: proc()) =
     repo.adapter.rollbackTransaction(conn)
     raise
   finally:
-    repo.adapter.disconnect(conn)
+    repo.releaseConn(conn)
 
 # --- Макро за дефиниране на Repo ---
 
 macro necto_repo*(name: untyped, body: untyped): untyped =
-  ## Дефинира нов Repo модул/тип.
-  ##
-  ## Пример:
-  ##   necto_repo AppRepo:
-  ##     adapter PostgresAdapter
-  ##     host "localhost"
-  ##     database "my_app"
+  ## Дефинира нов Repo модул/тип със свой адаптер.
   result = newStmtList()
 
-  var adapterType = ident("PostgresAdapter")
+  var adapterType = newIdentNode("PostgresAdapter")
   var hostVal = newLit("localhost")
   var portVal = newLit(5432)
   var userVal = newLit("postgres")
@@ -110,7 +330,7 @@ macro necto_repo*(name: untyped, body: untyped): untyped =
   var poolSizeVal = newLit(10)
 
   for child in body:
-    if child.kind == nnkCall:
+    if child.kind in {nnkCall, nnkCommand}:
       let key = $child[0]
       case key
       of "adapter":
@@ -129,57 +349,31 @@ macro necto_repo*(name: untyped, body: untyped): untyped =
         poolSizeVal = child[1]
 
   let typeName = name
-  let instanceName = ident(toLowerAscii($name) & "Instance")
-  let newProcName = ident("new" & $name)
+  let procName = newIdentNode("new" & $name)
+  let instanceName = newIdentNode(toLowerAscii($name) & "Instance")
 
-  # type Name = ref object of Repo
-  var typeDef = newTree(nnkTypeDef,
-    newTree(nnkPostfix, ident("*"), typeName),
-    newEmptyNode(),
-    newTree(nnkRefTy,
-      newTree(nnkObjectTy,
-        newEmptyNode(),
-        newTree(nnkOfInherit, ident("Repo")),
-        newTree(nnkRecList)
+  result.add(newTree(nnkTypeSection,
+    newTree(nnkTypeDef,
+      newTree(nnkPostfix, newIdentNode("*"), typeName),
+      newEmptyNode(),
+      newTree(nnkRefTy,
+        newTree(nnkObjectTy,
+          newEmptyNode(),
+          newTree(nnkOfInherit, newIdentNode("Repo")),
+          newTree(nnkRecList)
+        )
       )
     )
-  )
-  result.add(newTree(nnkTypeSection, typeDef))
+  ))
 
-  # proc newName(): Name = ...
-  var procBody = newStmtList()
-  var adapterConstr = newTree(nnkCall, adapterType)
-  adapterConstr.add(newTree(nnkExprColonExpr, ident("host"), hostVal))
-  adapterConstr.add(newTree(nnkExprColonExpr, ident("port"), portVal))
-  adapterConstr.add(newTree(nnkExprColonExpr, ident("user"), userVal))
-  adapterConstr.add(newTree(nnkExprColonExpr, ident("password"), passVal))
-  adapterConstr.add(newTree(nnkExprColonExpr, ident("database"), dbVal))
-  adapterConstr.add(newTree(nnkExprColonExpr, ident("poolSize"), poolSizeVal))
+  result.add(quote do:
+    proc `procName`*(): `typeName` =
+      var adapter = newPostgresAdapter(
+        `hostVal`, `userVal`, `passVal`, `dbVal`,
+        port = `portVal`,
+        poolSize = `poolSizeVal`
+      )
+      result = `typeName`(adapter: adapter)
 
-  var objConstr = newTree(nnkObjConstr,
-    newTree(nnkExprColonExpr, ident("adapter"), adapterConstr)
+    let `instanceName`* = `procName`()
   )
-  objConstr[0] = typeName
-  procBody.add(newTree(nnkAsgn, ident("result"), objConstr))
-
-  var formalParams = newTree(nnkFormalParams, typeName)
-  var newProcDef = newTree(nnkProcDef,
-    newTree(nnkPostfix, ident("*"), newProcName),
-    newEmptyNode(),
-    newEmptyNode(),
-    formalParams,
-    newEmptyNode(),
-    newEmptyNode(),
-    procBody
-  )
-  result.add(newProcDef)
-
-  # var instance = newName()
-  var varStmt = newTree(nnkVarSection,
-    newTree(nnkIdentDefs,
-      newTree(nnkPostfix, ident("*"), instanceName),
-      newEmptyNode(),
-      newTree(nnkCall, newProcName)
-    )
-  )
-  result.add(varStmt)

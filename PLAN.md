@@ -1,25 +1,29 @@
-# Necto — Архитектурен план
+# Necto — Архитектурен план v2.0
 
-> Версия: 0.1.0  
+> Версия: 0.2.0  
 > Дата: 2026-05-26  
-> Цел: PostgreSQL-first ORM за Nim 2.x, вдъхновен от Ecto (Elixir) и Avram (Crystal).
+> Цел: PostgreSQL-first ORM за Nim 2.x, вдъхновен от Ecto (Elixir) и Avram (Crystal).  
+> Мото: *Crystal общността направи Avram. Nim заслужава нещо още по-добро.*
 
 ---
 
-## 1. Философия
+## 1. Философия и принципи
 
-Necto не е "ActiveRecord" клонинг. Следваме **Repository Pattern** с ясно разделение:
+Necto не е ActiveRecord. Следваме **Repository Pattern** със стриктно разделение:
 
-- **Schema** — *какво* представляват данните (структура, типове, релации).
-- **Query** — *как* четем данните (композируем DSL).
-- **Changeset** — *как* променяме данните (cast, валидация, constraints).
-- **Repo** — *къде* живеят данните (връзка, транзакции, адаптер).
+- **Schema** — *какво* представляват данните (структура, типове, релации, виртуални полета).
+- **Query** — *как* четем данните (композируем, immutable, type-safe DSL).
+- **Changeset** — *как* променяме данните (cast, валидация, constraints, dirty tracking).
+- **Repo** — *къде* живеят данните (връзка, пул, транзакции, адаптер).
 
-За разлика от съществуващия `norm`, Necto ще бъде:
-- **Macro-heavy** — генерираме type-safe методи за всяка колона и асоциация по време на компилация.
-- **Query-first** — заявките са първокласни обекти, не просто натрупани низове.
-- **Changeset-driven writes** — вмъкване/актуализация минават през changeset, а не директно през обект.
-- **No lazy loading** — асоциациите се зареждат само чрез `preload`, както в Ecto.
+### Защо не ActiveRecord?
+
+| ActiveRecord проблем | Necto решение |
+|---------------------|---------------|
+| Скрито lazy loading (N+1) | **Явен `preload`** — винаги знаеш кога се зареждат релации |
+| Моделът знае за БД (`.save`) | **Repo е единственият gateway** — моделът е чиста структура |
+| SQL injection през string interpolation | **Parameterized queries** — `$1, $2` placeholders навсякъде |
+| Runtime грешки в заявки | **Compile-time проверка** на полета и типове където е възможно |
 
 ---
 
@@ -30,36 +34,39 @@ necto/
 ├── necto.nimble
 ├── README.md
 ├── PLAN.md
+├── AGENTS.md
 ├── src/
-│   ├── necto.nim                    # Публичен API — import necto
+│   ├── necto.nim                    # Публичен API — `import necto`
 │   └── necto/
-│       ├── repo.nim                 # Repo макро и runtime
-│       ├── schema.nim               # Schema/Model макроси
-│       ├── changeset.nim            # Changeset тип и валидации
-│       ├── query.nim                # Query DSL и структура
-│       ├── query_builder.nim        # SQL генератор
-│       ├── type_system.nim          # Cast/Load/Dump, custom types
-│       ├── associations.nim         # HasMany, BelongsTo, HasOne
-│       ├── preloader.nim            # Preload логика
-│       ├── migration.nim            # Миграционен DSL
-│       ├── migrator.nim             # Runner и версиониране
+│       ├── repo.nim                 # Repo макро, connection context, transaction scope
+│       ├── schema.nim               # `necto_schema` макро, reflection, row loader
+│       ├── changeset.nim            # Changeset тип, cast, валидации, constraints
+│       ├── query.nim                # Query AST структура
+│       ├── query_builder.nim        # SQL генератор с parameter binding
+│       ├── query_dsl.nim            # Type-safe макроси: `where`, `select`, `order_by`
+│       ├── type_system.nim          # Cast/Load/Dump, custom types, enums
+│       ├── associations.nim         # HasMany, BelongsTo, HasOne метаданни
+│       ├── preloader.nim            # Batch preload (N+1 safe), typedesc dispatch
+│       ├── migration.nim            # Migration DSL + SQL генератори
+│       ├── migrator.nim             # Runner, версиониране, CLI hooks
 │       ├── adapters/
-│       │   ├── base.nim             # Адаптер интерфейс
-│       │   └── postgres.nim         # PostgreSQL имплементация
-│       └── errors.nim               # Изключения (NotFoundError, RollbackError...)
+│       │   ├── base.nim             # Adapter интерфейс
+│       │   └── postgres.nim         # PostgreSQL имплементация + пул
+│       └── errors.nim               # Изключения йерархия
 ├── tests/
 │   ├── support/
-│   │   ├── test_repo.nim            # Тестов Repo
-│   │   └── test_schemas.nim         # Тестови модели
-│   ├── t_repo.nim
-│   ├── t_schema.nim
-│   ├── t_query.nim
-│   ├── t_changeset.nim
-│   ├── t_associations.nim
-│   └── t_migrations.nim
+│   │   ├── test_repo.nim            # Тестов Repo конфиг
+│   │   └── test_schemas.nim         # Тестови модели (User, Post, Comment)
+│   ├── t_repo.nim                   # Connection, transaction, pool тестове
+│   ├── t_schema.nim                 # Schema макро + reflection тестове
+│   ├── t_query.nim                  # Query DSL + SQL генерация
+│   ├── t_changeset.nim              # Cast, валидации, грешки
+│   ├── t_associations.nim           # BelongsTo, HasMany, preload
+│   ├── t_migrations.nim             # Миграции up/down
+│   └── t_integration.nim            # Пълен интеграционен тест (CRUD + query + preload)
 └── examples/
-    └── friends/                     # Като Ecto examples/friends
-        ├── src/friends.nim
+    └── friends/                     # Пълен пример със seed + CRUD + query
+        ├── friends.nim
         └── migrations/
 ```
 
@@ -67,338 +74,286 @@ necto/
 
 ## 3. Технологичен стек
 
-| Компонент | Избор | Алтернатива | Забележка |
-|-----------|-------|-------------|-----------|
-| Nim версия | **2.2.x** | — | Използваме `strictFuncs`, `views` където е уместно. |
-| PostgreSQL драйвер | **ndb/postgres** или **db_postgres** | asyncpg | За MVP синхронен достъп е по-прост за дебъгване. |
-| Connection pool | **Вграден в Necto** | Външен пакет | Nim няма стандартен пул; ще ползваме `Deque` + `locks`. |
-| SQL placeholders | **$1, $2 …** (PostgreSQL) | ? | PostgreSQL-specific за по-чист код. |
-| Макро система | **Nim macros/stdlib** | — | Ще комбинираме `macro`, `typeinfo`, `fieldPairs`. |
+| Компонент | Избор | Забележка |
+|-----------|-------|-----------|
+| Nim | **2.2.x** | ORC, `strictFuncs`, `views` |
+| PostgreSQL драйвер | **db_connector/db_postgres** | Синхронен, стабилен, част от Nim ecosystem |
+| Connection pool | **Вграден** (`Deque` + `Lock`) | Nim няма стандартен пул |
+| SQL placeholders | **$1, $2, …** | PostgreSQL native |
+| Macros | **Nim macros/stdlib** | `macro`, `typedesc`, `fieldPairs`, `hasCustomPragma` |
+| Test runner | **unittest** | Стандартен Nim модул |
 
 ---
 
-## 4. Фази на разработка
+## 4. Критични Nim предизвикателства и решения
 
-### Фаза 0: Скелет и инфраструктура
-- [ ] `necto.nimble` със зависимости.
-- [ ] CI конфигурация (GitHub Actions) с PostgreSQL service.
-- [ ] Тестова база данни `necto_test` (host: localhost, user: postgres, password: pas+123).
-- [ ] Базов `errors.nim`.
+### 4.1 Type-safe query DSL без `it` захващане (като Crystal/Elixir)
 
-### Фаза 1: Repo + PostgreSQL Адаптер
-**Цел:** Можем да се свързваме с БД и да изпълняваме raw SQL.
+**Проблем:** Nim няма `it` макро като Crystal, нито `^` интерполация като Ecto.
+**Решение:** Използваме **static string макро** с compile-time проверка:
 
-- [ ] `necto/adapters/base.nim` — интерфейс/концепт:
-  ```nim
-  type Adapter* = concept a
-    a.connect() is Connection
-    a.query(conn, sql, args) is seq[Row]
-    a.exec(conn, sql, args)
-    a.transaction(conn, body)
-  ```
-- [ ] `necto/adapters/postgres.nim` — обвивка около `db_postgres`:
-  - `PgAdapter` с конфигурация (host, port, user, password, database, pool_size).
-  - Connection pool с `lock` и `Deque[DbConn]`.
-  - `checkout()` / `checkin()`.
-- [ ] `necto/repo.nim` — `necto_repo` макро:
-  ```nim
-  necto_repo AppRepo:
-    adapter PgAdapter
-    host "localhost"
-    database "my_app"
-    pool_size 10
-  ```
-  Генерира модул `AppRepo` с:
-  - `proc all*(sql: SqlQuery, args: varargs[string, `$`]): seq[Row]`
-  - `proc one*(...): Row`
-  - `proc transaction*(body: proc())`
-  - `proc insert*(sql, args)` и т.н.
-
-### Фаза 2: Schema (Model) дефиниция
-**Цел:** Дефинираме модели с полета, типове и метаданни.
-
-- [ ] `necto/schema.nim` — `necto_schema` макро:
-  ```nim
-  necto_schema User:
-    table "users"
-    field id: int64 {primary_key, auto_increment}
-    field name: string {null: false}
-    field email: string {null: false, unique: true}
-    field age: int
-    field inserted_at: DateTime
-    field updated_at: DateTime
-  ```
-  Генерира:
-  - `User` обект (`ref object` или `object`) с полета.
-  - `UserMetadata` константа — информация за таблица, колони, типове.
-  - `User.__schema__()` reflection функции.
-  - `User.__changeset__()` — map от поле -> тип.
-- [ ] Поддръжка на:
-  - Custom primary keys (`primary_key custom_id: string`).
-  - `timestamps` макро — добавя `inserted_at`, `updated_at`.
-  - `virtual` полета — не се записват в БД.
-  - `embeds_one` / `embeds_many` (по-късно, чрез JSONB).
-
-### Фаза 3: Type System
-**Цел:** Cast между Nim типове и PostgreSQL типове.
-
-- [ ] `necto/type_system.nim` — `NectoType` протокол/концепт:
-  ```nim
-  type NectoType*[T] = concept t
-    t.cast(value: string): Result[T, string]
-    t.load(db_value: string): T
-    t.dump(value: T): string
-    t.db_type(): string          # "varchar", "int8", "timestamp" ...
-  ```
-- [ ] Built-in типове:
-  - `string` → `text`/`varchar`
-  - `int`, `int64`, `float` → `int4`, `int8`, `float8`
-  - `bool` → `boolean`
-  - `DateTime` → `timestamp with time zone`
-  - `JsonNode` → `jsonb`
-  - `seq[T]` → масиви (PostgreSQL arrays)
-- [ ] Custom types — потребителят може да дефинира:
-  ```nim
-  type Status* = enum Active, Inactive
-  necto_enum(Status)  # генерира NectoType имплементация
-  ```
-
-### Фаза 4: Query Builder
-**Цел:** Type-safe, композируем DSL за заявки.
-
-- [ ] `necto/query.nim` — `Query[T]` структура:
-  ```nim
-  type Query*[T] = object
-    select_fields: seq[string]
-    wheres: seq[WhereClause]
-    joins: seq[JoinClause]
-    orders: seq[OrderClause]
-    limit_val: Option[int]
-    offset_val: Option[int]
-    preload_assocs: seq[string]
-  ```
-- [ ] DSL:
-  ```nim
-  Query.from(User)
-    .where(_.age >= 18 and _.name == "Ivan")
-    .order_by(_.age.desc)
-    .limit(10)
-    .offset(20)
-    .select(_.id, _.name)
-  ```
-- [ ] **Техническо предизвикателство:** Nim макросите не позволяват точно същия синтаксис като Crystal (`_.age >= 18`).
-    - **Решение:** Използваме `dot` макро или `it` шаблон:
-    ```nim
-    Query.from(User).where(it.age >= 18).where(it.name == "Ivan")
-    ```
-    Или пък:
-    ```nim
-    Query.from(User).where(q => q.age >= 18 and q.name == "Ivan")
-    ```
-- [ ] SQL генератор в `query_builder.nim`:
-  - Произвежда `SELECT ... FROM ... WHERE ...` с `$N` placeholders.
-  - Поддържа `AND`, `OR`, `IN`, `IS NULL`, `LIKE`, `ILIKE`.
-  - Поддържа `JOIN` (inner, left, right).
-- [ ] Repo integration:
-  ```nim
-  AppRepo.all(query)  # -> seq[User]
-  AppRepo.one(query)  # -> Option[User]
-  AppRepo.count(query) # -> int64
-  ```
-
-### Фаза 5: Changeset
-**Цел:** Всяка промяна на данни минава през валидация и cast.
-
-- [ ] `necto/changeset.nim` — `Changeset[T]` структура:
-  ```nim
-  type Changeset*[T] = object
-    data*: T                    # оригиналният обект (или празен)
-    params*: Table[string, string] # raw вход
-    changes*: Table[string, string] # само променените полета
-    errors*: Table[string, seq[string]]
-    valid*: bool
-    action*: Action            # Create | Update | Delete
-  ```
-- [ ] `cast` — филтрира позволени полета и конвертира типове:
-  ```nim
-  proc cast*[T](cs: Changeset[T], params: Table[string, string], permitted: openArray[string]): Changeset[T]
-  ```
-- [ ] Вградени валидации:
-  - `validate_required(fields)`
-  - `validate_format(field, regex)`
-  - `validate_inclusion(field, range|seq)`
-  - `validate_length(field, min, max)`
-  - `validate_number(field, greater_than, less_than)`
-  - `validate_confirmation(field)` — за пароли.
-- [ ] Constraints (проверяват се от БД, грешките се мапват обратно):
-  - `unique_constraint(field)`
-  - `foreign_key_constraint(field)`
-- [ ] Changeset дефиниран в самия schema:
-  ```nim
-  necto_schema User:
-    ...
-    changeset signup(params):
-      this
-        |> cast(params, @["name", "email"])
-        |> validate_required(@["name", "email"])
-        |> validate_format(:email, re".+@.+")
-  ```
-- [ ] Repo write API:
-  ```nim
-  AppRepo.insert!(changeset)  # -> T или хвърля ValidationError
-  AppRepo.update!(changeset)  # -> T
-  AppRepo.delete!(changeset)  # -> T
-  AppRepo.insert(changeset)   # -> Result[T, Changeset[T]]
-  ```
-
-### Фаза 6: Associations
-**Цел:** Релации между модели без lazy loading.
-
-- [ ] `necto/associations.nim` — макроси:
-  ```nim
-  necto_schema Post:
-    belongs_to author: User        # добавя `author_id: int64`
-    has_many comments: Comment     # няма колона в БД, само метаданни
-  ```
-- [ ] Preload:
-  ```nim
-  AppRepo.all(
-    Query.from(Post).preload(:author)
-  )
-  # Изпълнява 2 заявки и асемблира обектите.
-  ```
-  ```nim
-  AppRepo.all(
-    Query.from(Post).preload(:comments, Query.from(Comment).where(it.approved == true))
-  )
-  ```
-- [ ] `Ecto.assoc` еквивалент:
-  ```nim
-  let comments = AppRepo.all(necto.assoc(post, :comments))
-  ```
-- [ ] `build_assoc`:
-  ```nim
-  let comment = necto.build_assoc(post, :comments, %{"body": "Nice!"})
-  ```
-
-### Фаза 7: Migrations
-**Цел:** Версиониране на схемата.
-
-- [ ] `necto/migration.nim` — DSL:
-  ```nim
-  necto_migration CreateUsers, "20260526120000":
-    def up:
-      create table(:users) do |t|
-        t.primary_key :id, :bigserial
-        t.string :name, null: false
-        t.string :email, null: false
-        t.index :email, unique: true
-        t.timestamps
-      end
-
-    def down:
-      drop table(:users)
-  ```
-- [ ] `necto/migrator.nim` — runner:
-  - Проверява таблица `necto_schema_migrations`.
-  - Изпълнява pending миграции в транзакция.
-  - Поддържа `up`, `down`, `redo`, `status`.
-- [ ] Nimble tasks:
-  ```bash
-  nimble necto.migrate
-  nimble necto.rollback
-  nimble necto.gen.migration CreatePosts
-  ```
-
-### Фаза 8: Advanced Query Features
-- [ ] `select` с агрегати: `count`, `sum`, `avg`, `min`, `max`.
-- [ ] `group_by` и `having`.
-- [ ] `distinct` и `distinct_on` (PostgreSQL).
-- [ ] `lock` (`FOR UPDATE`).
-- [ ] Subqueries: `where(it.id.in(Query.from(...)))`.
-- [ ] Raw SQL fragments: `where(fragment("lower(?) = ?", name, "ivan"))`.
-- [ ] `union` / `intersect` / `except`.
-
-### Фаза 9: Async/Pool/Performance
-- [ ] Опционална async поддръжка чрез `asyncpg`.
-- [ ] По-интелигентен connection pool (min/max, timeout, health check).
-- [ ] Prepared statement cache.
-- [ ] Batch inserts (`insert_all`).
-
-### Фаза 10: Multi-database, Read Replicas
-- [ ] `Repo.put_dynamic_repo()` подобно на Ecto.
-- [ ] Read/Write split конфигурация.
-
----
-
-## 5. Специфични Nim предизвикателства и решения
-
-### 5.1 Макро система vs. Crystal/Elixir
-
-| Ecto/Avram | Nim решение |
-|------------|-------------|
-| `schema "users" do ... end` | `necto_schema User: ...` — `macro` трансформира тялото в `type` + метаданни. |
-| `field :name, :string` | `field name: string` — използваме Nim типове директно. |
-| Pipe оператор `\|>` | Nim има вграден `\|>` за прокарване; използваме го за changesets. |
-| `from u in User, where: u.age > 18` | `Query.from(User).where(it.age > 18)` — `it` е специален идентификатор, който макрото разпознава. |
-| `^min` за интерполация | Не е нужно — Nim има стандартни променливи; просто подаваме стойностите като params. |
-
-### 5.2 Type Reflection
-
-Nim предоставя:
-- `fieldPairs` — обхождане на полетата на обект по време на компилация.
-- `hasCustomPragma` / `getCustomPragmaVal` — за метаданни върху полета.
-- `typeinfo` — runtime reflection, по-бавен.
-
-Ще ползваме **compile-time reflection** за генериране на query criteria, changeset атрибути и migration колони.
-
-### 5.3 Грешки и Exception Safety
-
-- Ecto връща `{:ok, _} / {:error, _}` tuples. Nim няма вграден Result тип в stdlib, но можем да използваме `Option` + exceptions или външен `result` пакет.
-- **Решение:** Публичният API ще предоставя два варианта:
-  ```nim
-  proc insert*[T](repo: Repo, cs: Changeset[T]): T  # хвърля ValidationError
-  proc insert*[T](repo: Repo, cs: Changeset[T]): Result[T, Changeset[T]]  # връща грешката
-  ```
-  За простота в MVP-то започваме с exceptions, после добавяме `Result` варианти.
-
----
-
-## 6. База данни за разработка
-
-```yaml
-# config/test.yml (или .env)
-NECTO_DB_HOST: localhost
-NECTO_DB_PORT: 5432
-NECTO_DB_USER: postgres
-NECTO_DB_PASS: pas+123
-NECTO_DB_NAME: necto_test
+```nim
+# Вместо: Query.from(User).where(it.age >= 18)  # невъзможно в Nim
+# Ползваме:
+Query.from(User).where("age >= ?", 18)          # runtime params
+# или (в бъдеще):
+Query.from(User).whereIt(age >= 18)              # макро проверява `age` поле
 ```
 
-Всяка тестова функция се очаква да работи в транзакция, която се rollback-ва след теста (setup/teardown).
+За **`whereIt`** макрото:
+- Извлича идентификаторите от AST (`age`, `name`).
+- Проверява срещу `SchemaMeta.fields` по време на компилация (чрез `static` блок).
+- Генерира `where("age >= ?", "18")` с правилен тип conversion.
+
+### 4.2 Connection Context в транзакции
+
+**Проблем:** `repo.transaction(body)` не може да предаде `conn` на `body`, защото `body` е `proc()` без параметри.
+**Решение:** **Thread-local connection context**:
+
+```nim
+var threadLocalConn {.threadvar.}: Connection
+
+proc getConn(repo: Repo): Connection =
+  if threadLocalConn != nil:
+    return threadLocalConn
+  return repo.adapter.connect()
+
+proc transaction(repo: Repo, body: proc()) =
+  let conn = repo.adapter.connect()
+  threadLocalConn = conn
+  try:
+    repo.adapter.beginTransaction(conn)
+    body()
+    repo.adapter.commitTransaction(conn)
+  except:
+    repo.adapter.rollbackTransaction(conn)
+    raise
+  finally:
+    threadLocalConn = nil
+    repo.adapter.disconnect(conn)
+```
+
+Така `repo.insert(cs)` вътре в `transaction` автоматично ползва същата връзка.
+
+### 4.3 Preload с typedesc dispatch
+
+**Проблем:** `preloadBelongsTo` е generic, но трябва да извика `load(row, Child)` за различни `Child` типове.
+**Решение:** `load` е вече overloaded по `typedesc`. В `preload` използваме `macro` за генериране на `when` разклонения за всеки възможен Child тип, или пазим `proc(row: DbRow): RootObj` callback в `AssocMeta`.
+
+По-чисто решение (като Ecto): `preload` е **template**, който резолвира `load` по време на компилация:
+
+```nim
+template preload*[T, A](repo: Repo, records: var seq[T], assoc: typedesc[A]) =
+  when A is User:
+    preloadBelongsTo[T, User](repo, records, assocMeta, UserSchema)
+  elif A is Post:
+    preloadBelongsTo[T, Post](repo, records, assocMeta, PostSchema)
+```
+
+### 4.4 Parameter binding (SQL Injection защита)
+
+**Проблем:** Текущият `Query.toSql` слага стойностите директно в SQL низа.
+**Решение:** Query натрупва **`(sql_fragment, params)`** двойки:
+
+```nim
+type BoundQuery* = object
+  sql*: string
+  args*: seq[string]
+
+proc toBoundQuery*[T](q: Query[T]): BoundQuery =
+  # Генерира SQL с $1, $2 placeholders + seq от стойности
+```
+
+Repo методите (`all`, `one`, `count`) винаги ползват `adapter.query(conn, boundQuery.sql, boundQuery.args)`.
+
+### 4.5 Changeset type casting
+
+**Проблем:** `castFields` копира string стойности без conversion.
+**Решение:** Schema-aware cast чрез `SchemaMeta`:
+
+```nim
+proc castFields*[T](cs: Changeset[T], permitted: openArray[string]): Changeset[T] =
+  let meta = schemaMeta(T)
+  for field in permitted:
+    if cs.params.hasKey(field):
+      let fmeta = meta.fieldByName(field)
+      let rawVal = cs.params[field]
+      try:
+        let casted = castValue(rawVal, fmeta.nimType)  # dispatch по тип
+        cs.changes[field] = rawVal  # или сериализирана стойност
+      except ValueError:
+        cs.addError(field, "is invalid")
+```
 
 ---
 
-## 7. Критерии за успех (MVP)
+## 5. Фази на разработка (приоритизирани)
 
-За да кажем, че Necto е готов за първи release, трябва да работи:
+### ✅ Фаза 0: Скелет (ГОТОВО)
+- [x] `necto.nimble`, модули, errors, adapter interface
+- [x] PostgreSQL адаптер с пул
+- [x] `necto_schema` макро (тип, meta, constructor, loader)
+- [x] `necto_repo` макро
+- [x] `necto_migration` макро + migrator
+- [x] CLI tasks: migrate, rollback, status, gen_migration
 
-1. Свързване с PostgreSQL чрез Repo.
-2. Дефиниране на Schema с полета, primary key, timestamps.
-3. CRUD през Changeset (cast + validate_required + insert/update/delete).
-4. Прости заявки: `where`, `order_by`, `limit`, `offset`, `select`.
-5. `preload` на `belongs_to` и `has_many`.
-6. Миграции с `create table`, `add`, `drop`.
-7. Поне 80% code coverage на core модули.
+### 🔥 Фаза 1: Core стабилност (КРИТИЧНО)
+- [ ] **Connection context** — thread-local conn за транзакции
+- [ ] **Bound queries** — всички заявки с `$N` placeholders + args
+- [ ] **Schema-aware cast** — Changeset прави реално type conversion
+- [ ] **Основни тестове** — поне 80% покритие на repo, query, changeset
+- [ ] **Integration test** — пълен CRUD цикъл върху реална PostgreSQL
+
+### 🔥 Фаза 2: Query DSL (КРИТИЧНО)
+- [ ] `where(field, op, value)` с правилно parameter binding
+- [ ] `whereIt` макро — compile-time field checking
+- [ ] `select`, `order_by`, `limit`, `offset`, `distinct`
+- [ ] `join` — inner/left/right с type-safe колони
+- [ ] `count`, `sum`, `avg` агрегати
+- [ ] `group_by`, `having`
+- [ ] Subqueries: `where("id IN ?", subquery)`
+- [ ] Raw fragments: `where(fragment("lower(?) = ?", name, "ivan"))`
+
+### 🔥 Фаза 3: Асоциации и Preload (КРИТИЧНО)
+- [ ] `belongs_to` — batch preload (2 заявки)
+- [ ] `has_many` — batch preload + filter subquery
+- [ ] `has_one` — batch preload
+- [ ] `preload` в Query: `Query.from(Post).preload(:author)`
+- [ ] `preload` в Repo: `repo.preload(posts, :author)`
+- [ ] `build_assoc` / `assoc` helper-и
+
+### Фаза 4: Advanced Changeset
+- [ ] `validate_confirmation`, `validate_exclusion`, `validate_subset`
+- [ ] `unique_constraint` с DB проверка (лови `unique_violation`)
+- [ ] `foreign_key_constraint` с DB проверка
+- [ ] `put_change`, `force_change`, `delete_change`
+- [ ] `apply_changes` — връща обект без запис в БД
+
+### Фаза 5: Advanced Migrations
+- [ ] `rename_table`, `rename_column`
+- [ ] `add_index`, `drop_index` (concurrent)
+- [ ] `add_reference`, `remove_reference`
+- [ ] `execute` — raw SQL в миграция
+- [ ] Migration rollback с `up`/`down` checksum валидация
+
+### Фаза 6: Performance и Production readiness
+- [ ] Prepared statement cache (per connection)
+- [ ] Batch insert: `insert_all(schemas, entries)`
+- [ ] Connection pool metrics (wait time, active conns)
+- [ ] Query timeout и slow query log
+- [ ] Read replica support: `repo.read()` vs `repo.write()`
+
+### Фаза 7: Async (бъдеще)
+- [ ] Async adapter върху `asyncpg` или `pgasync`
+- [ ] `async` варианти на `all`, `one`, `insert`, `update`
 
 ---
 
-## 8. Вдъхновение и благодарности
+## 6. API Design (целево)
 
-- [Ecto](https://github.com/elixir-ecto/ecto) — José Valim и екипът на Elixir.
-- [Avram](https://github.com/luckyframework/avram) — Lucky Framework и Crystal общността.
-- [Norm](https://github.com/moigagoo/norm) — съществуващ ORM за Nim, от който ще се учим какво да избегнем и какво да подобрим.
+### Schema
+
+```nim
+necto_schema User:
+  table "users"
+  field id: int64 {.primary_key, auto_increment.}
+  field name: string {.not_null.}
+  field email: string {.not_null, unique.}
+  field age: Option[int]
+  field meta: JsonNode
+  timestamps                         # created_at, updated_at
+
+  changeset signup(params):
+    this
+      |> cast(params, @[name, email, age])
+      |> validate_required(@[name, email])
+      |> validate_format(email, re".+@.+")
+      |> validate_inclusion(age, 18..120)
+      |> unique_constraint(email)
+```
+
+### Query
+
+```nim
+let adults = repo.all(
+  Query.from(User)
+    .where("age >= ?", 18)
+    .where("name ILIKE ?", "Ivan%")
+    .order_by("name", Asc)
+    .limit(10)
+    .preload(:posts)
+)
+
+let count = repo.count(Query.from(User).where("active = ?", true))
+```
+
+### Changeset + Write
+
+```nim
+let cs = User.signup(params)
+if cs.isValid:
+  let user = repo.insert!(cs)
+else:
+  echo cs.errors
+
+# Update
+var cs = user |> change(%{"name": "New Name"})
+              |> validate_required(@["name"])
+repo.update!(cs)
+```
+
+### Transaction
+
+```nim
+repo.transaction proc() =
+  let user = repo.insert!(User.signup(params))
+  let post = repo.insert!(Post.changeset(%{"title": "Hello", "author_id": $user.id}))
+  # Ако има грешка — автоматичен rollback
+```
 
 ---
 
-*Планът е жив документ — ще се актуализира с всяка нова фаза.*
+## 7. База данни за разработка и тестове
+
+```bash
+# PostgreSQL (вече създадена)
+PGHOST=localhost
+PGUSER=postgres
+PGPASSWORD=pas+123
+PGDATABASE=necto_test
+PGPORT=5432
+```
+
+Всеки тест работи в транзакция с автоматичен rollback (setup/teardown pattern):
+
+```nim
+setup:
+  repo.exec("BEGIN")
+teardown:
+  repo.exec("ROLLBACK")
+```
+
+---
+
+## 8. Критерии за успех (v0.2.0 MVP)
+
+1. **Компилира се** без warnings на Nim 2.2.x.
+2. **Всички тестове минават** с реална PostgreSQL връзка.
+3. **SQL Injection невъзможен** — никога не конкатенираме стойности в SQL.
+4. **Transaction safety** — N операции в транзакция използват една връзка.
+5. **N+1 елиминиран** — `preload` зарежда асоциациите в точно 2 заявки.
+6. **Type-safe заявки** — грешни имена на полета се хващат на compile-time (чрез `whereIt`).
+7. **Clean separation** — Schema не знае за Repo, Query не знае за Adapter.
+
+---
+
+## 9. Вдъхновение
+
+- **[Ecto](https://github.com/elixir-ecto/ecto)** — José Valim. Златен стандарт за ORM дизайн.
+- **[Avram](https://github.com/luckyframework/avram)** — Lucky Framework. Показа че Ecto-идеите работят в compiled език.
+- **[Norm](https://github.com/moigagoo/norm)** — съществуващ Nim ORM. Доказа че Nim може да има ORM, но липсва Query DSL и Changeset.
+- **[Diesel](https://diesel.rs/)** (Rust) — type-safe SQL. Мотивация за compile-time проверки.
+
+---
+
+*Планът е жив документ. Актуализира се с всяка нова фаза.*

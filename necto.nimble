@@ -1,7 +1,7 @@
 # Package
 version       = "0.1.0"
 author        = "Nim Community"
-description   = "Ecto-inspired ORM for Nim with type-safe queries and changesets"
+description   = "Ecto-inspired ORM for Nim with type-safe queries, changesets and migrations"
 license       = "MIT"
 srcDir        = "src"
 
@@ -9,7 +9,22 @@ srcDir        = "src"
 requires "nim >= 2.0.0"
 requires "db_connector >= 0.1.0"
 
-# Tasks
+# --- Migration tasks ---
+
+task migrate, "Run pending migrations":
+  exec "nim c -r --path:src src/necto_migrate.nim"
+
+task rollback, "Rollback last migration":
+  exec "nim c -r --path:src src/necto_rollback.nim"
+
+task gen_migration, "Generate a new migration file":
+  exec "nim c -r --path:src src/necto_gen_migration.nim"
+
+task migrate_status, "Show migration status":
+  exec "nim c -r --path:src src/necto_status.nim"
+
+# --- Test tasks ---
+
 task test, "Run all test suites":
   exec "nimble test_postgres"
 

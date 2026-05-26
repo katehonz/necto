@@ -1,0 +1,29 @@
+# Nim build artifacts
+nimcache/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Compiled binaries (no extension on Unix)
+tests/t_repo
+tests/debug_schema
+tests/test_schema_compile
+src/necto_migrate
+src/necto_rollback
+src/necto_status
+src/necto_gen_migration
+
+# Test outputs
+testresults/
+
+# Editor
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

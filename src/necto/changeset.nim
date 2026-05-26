@@ -8,7 +8,7 @@
 ##             .validate_required(@["name", "email"])
 ##             .validate_format("email", re".+@.+")
 
-import std/[tables, strutils, re, options, sequtils, macros]
+import std/[tables, strutils, re, options, macros]
 import ./schema
 import ./type_system
 import ./errors

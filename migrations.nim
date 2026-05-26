@@ -1,0 +1,3 @@
+# Migrations registry
+include migrations/m20260526120000_create_users
+include migrations/m20260526140000_create_posts

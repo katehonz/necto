@@ -9,7 +9,7 @@
 ##     .limit(10)
 ##     .select(it.id, it.name)
 
-import std/[macros, sequtils, strutils, options, tables]
+import std/[macros, strutils, options, tables]
 import ./schema
 
 export schema
