@@ -176,9 +176,8 @@ suite "Associations and Preload":
       "author"
     )
     check(posts.len == 2)
-    # allWithPreload зарежда асоциациите автоматично чрез batch preload
-    # Въпреки че обектите в seq не се мутират директно, batch preload се изпълнява
-    # Тук проверяваме че няма runtime грешка и операцията е N+1-safe
+    check(posts[0].author.name == "AutoAuthor")
+    check(posts[1].author.name == "AutoAuthor")
 
   test "allWithPreload automatically loads has_many":
     # Seed
@@ -196,7 +195,8 @@ suite "Associations and Preload":
       "posts"
     )
     check(users.len == 1)
-    # Проверка че batch preload се изпълнява без грешка
+    check(users[0].posts.len == 3)
+    check(users[0].posts[0].title == "MP 1")
 
   test "HasOne preload returns profile by user_id":
     # Seed
@@ -228,4 +228,4 @@ suite "Associations and Preload":
       "profile"
     )
     check(users.len == 1)
-    # Проверка че batch preload се изпълнява без грешка
+    check(users[0].profile.bio == "Auto bio")

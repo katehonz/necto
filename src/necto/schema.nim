@@ -296,6 +296,14 @@ macro necto_schema*(name: untyped, body: untyped): untyped =
           result.`fkId` = loadValue(row[`idx`], int64)
         )
 
+        # Internal pointer field for preloaded association object
+        let ptrFieldName = assocName & "Cache"
+        let ptrField = newIdentNode(ptrFieldName)
+        fieldDefs.add(newIdentDefs(ptrField, newIdentNode("pointer")))
+        constructorAssignments.add(
+          nnkAsgn.newTree(nnkDotExpr.newTree(newIdentNode("result"), ptrField), newNilLit())
+        )
+
         # AssocMeta
         assocMetaNodes.add(nnkObjConstr.newTree(
           newIdentNode("AssocMeta"),
@@ -380,6 +388,16 @@ macro necto_schema*(name: untyped, body: untyped): untyped =
             this.action = "insert"
             `changesetBody`
         changesetFuncs.add(changesetProc)
+
+  # --- Internal preload tracking field ---
+  let preloadedType = newTree(nnkBracketExpr, newIdentNode("seq"), newIdentNode("string"))
+  fieldDefs.add(newIdentDefs(newIdentNode("preloaded"), preloadedType))
+  constructorAssignments.add(
+    nnkAsgn.newTree(
+      nnkDotExpr.newTree(newIdentNode("result"), newIdentNode("preloaded")),
+      newCall(newIdentNode("@"), newTree(nnkBracket))
+    )
+  )
 
   # --- Генериране на type дефиницията ---
   let typeName = newIdentNode(schemaName)
@@ -567,23 +585,79 @@ macro necto_schema*(name: untyped, body: untyped): untyped =
 
   # --- Генериране на preloadAssoc template ---
   var preloadWhenBranches: seq[NimNode] = @[]
+  var accessorTemplates: seq[NimNode] = @[]
   for am in assocMetaNodes:
     let assocNameLit = am[1][1]
     let kindIdent = am[2][1]
     let targetSchemaLit = am[3][1]
     let childType = newIdentNode($targetSchemaLit)
     let kindStr = $kindIdent
+    let assocNameStr = $assocNameLit
 
     var preloadCall: NimNode
     if kindStr == "akBelongsTo":
+      let fkField = am[4][1]
+      let fkFieldNode = newIdentNode($fkField)
+      let ptrFieldName = assocNameStr & "Cache"
+      let ptrFieldNode = newIdentNode(ptrFieldName)
       preloadCall = quote do:
-        discard preloadBelongsTo[`typeName`, `childType`](repo, records)
+        var childMap: Table[int64, `childType`] = initTable[int64, `childType`]()
+        if records.len == 0 or `assocNameLit` notin records[0].preloaded:
+          childMap = preloadBelongsTo[`typeName`, `childType`](repo, records)
+          for p in records:
+            if childMap.hasKey(p.`fkFieldNode`):
+              p.`ptrFieldNode` = cast[pointer](childMap[p.`fkFieldNode`])
+            else:
+              p.`ptrFieldNode` = nil
+          for p in records:
+            p.preloaded.add(`assocNameLit`)
+        childMap
+      let accessorIdent = newIdentNode($assocNameLit)
+      var accessorTemplate = newTree(nnkTemplateDef,
+        newTree(nnkPostfix, newIdentNode("*"), accessorIdent),
+        newEmptyNode(),
+        newEmptyNode(),
+        newTree(nnkFormalParams,
+          newIdentNode("untyped"),
+          newTree(nnkIdentDefs, newIdentNode("p"), typeName, newEmptyNode())
+        ),
+        newEmptyNode(),
+        newEmptyNode(),
+        newStmtList(
+          newTree(nnkCast, childType, nnkDotExpr.newTree(newIdentNode("p"), ptrFieldNode))
+        )
+      )
+      accessorTemplates.add(accessorTemplate)
     elif kindStr == "akHasMany":
+      let ownerKeyNode = newIdentNode("id")
+      let assocFieldNode = newIdentNode(assocNameStr)
       preloadCall = quote do:
-        discard preloadHasMany[`typeName`, `childType`](repo, records)
+        var childGroups: Table[int64, seq[`childType`]] = initTable[int64, seq[`childType`]]()
+        if records.len == 0 or `assocNameLit` notin records[0].preloaded:
+          childGroups = preloadHasMany[`typeName`, `childType`](repo, records)
+          for r in records:
+            if childGroups.hasKey(r.`ownerKeyNode`):
+              r.`assocFieldNode` = childGroups[r.`ownerKeyNode`]
+            else:
+              r.`assocFieldNode` = @[]
+          for r in records:
+            r.preloaded.add(`assocNameLit`)
+        childGroups
     elif kindStr == "akHasOne":
+      let ownerKeyNode = newIdentNode("id")
+      let assocFieldNode = newIdentNode(assocNameStr)
       preloadCall = quote do:
-        discard preloadHasOne[`typeName`, `childType`](repo, records)
+        var childMap: Table[int64, `childType`] = initTable[int64, `childType`]()
+        if records.len == 0 or `assocNameLit` notin records[0].preloaded:
+          childMap = preloadHasOne[`typeName`, `childType`](repo, records)
+          for r in records:
+            if childMap.hasKey(r.`ownerKeyNode`):
+              r.`assocFieldNode` = childMap[r.`ownerKeyNode`]
+            else:
+              r.`assocFieldNode` = nil
+          for r in records:
+            r.preloaded.add(`assocNameLit`)
+        childMap
     else:
       continue
 
@@ -611,6 +685,9 @@ macro necto_schema*(name: untyped, body: untyped): untyped =
       preloadWhenStmt
     )
     result.add(preloadTemplate)
+
+  for at in accessorTemplates:
+    result.add(at)
 
   result.add(dispatchProcs)
   for cf in changesetFuncs:

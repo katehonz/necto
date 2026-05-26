@@ -142,7 +142,9 @@ macro allWithPreload*(repoArg: Repo, qArg: typed, preloads: varargs[string]): un
   var preloadStmts = newStmtList()
   for p in preloads:
     let assocName = newLit($p)
-    preloadStmts.add(newCall(newIdentNode("preloadAssoc"), assocName, repoIdent, resIdent))
+    let cacheVar = newIdentNode("necto_preload_" & $p)
+    preloadStmts.add(newTree(nnkLetSection, newTree(nnkIdentDefs, cacheVar, newEmptyNode(),
+      newCall(newIdentNode("preloadAssoc"), assocName, repoIdent, resIdent))))
 
   var blockBody = newStmtList()
   blockBody.add(newTree(nnkLetSection, newTree(nnkIdentDefs, repoIdent, newEmptyNode(), repoArg)))
@@ -167,7 +169,9 @@ macro oneWithPreload*(repoArg: Repo, qArg: typed, preloads: varargs[string]): un
   var preloadStmts = newStmtList()
   for p in preloads:
     let assocName = newLit($p)
-    preloadStmts.add(newCall(newIdentNode("preloadAssoc"), assocName, repoIdent, resSeqIdent))
+    let cacheVar = newIdentNode("necto_preload_" & $p)
+    preloadStmts.add(newTree(nnkLetSection, newTree(nnkIdentDefs, cacheVar, newEmptyNode(),
+      newCall(newIdentNode("preloadAssoc"), assocName, repoIdent, resSeqIdent))))
 
   var blockBody = newStmtList()
   blockBody.add(newTree(nnkLetSection, newTree(nnkIdentDefs, repoIdent, newEmptyNode(), repoArg)))
