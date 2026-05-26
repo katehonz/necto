@@ -26,6 +26,7 @@ type
     op*: WhereOp
     value*: string
     conjunction*: string  # "AND" | "OR"
+    fragmentArgs*: seq[string]  # args from SqlFragment
 
   OrderClause* = object
     field*: string
@@ -201,7 +202,8 @@ proc whereDynamic*[T](q: Query[T], frag: SqlFragment): Query[T] =
     field: frag.sql,
     op: Eq,
     value: "",
-    conjunction: "AND"
+    conjunction: "AND",
+    fragmentArgs: frag.args
   ))
 
 proc whereFragment*[T](q: Query[T], frag: SqlFragment): Query[T] =
@@ -269,6 +271,8 @@ template toBoundQuery*[T](q: Query[T]): BoundQuery =
 
       if w.field.contains("$1") or w.field.contains("?") or w.field.contains("("):
         wheres.add(w.field)
+        for arg in w.fragmentArgs:
+          args.add(arg)
       else:
         case w.op
         of Eq:

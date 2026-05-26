@@ -14,7 +14,7 @@
 ##   AppRepo.all(Query.fromSchema(User).where("age", Gt, "18"))
 ##   AppRepo.insert(userChangeset)
 
-import std/[macros, options, strutils, tables]
+import std/[macros, options, strutils, tables, algorithm]
 import ./adapters/base
 import ./query
 import ./schema
@@ -250,49 +250,65 @@ proc buildInsertSql(cs: auto, meta: SchemaMeta): (string, seq[string]) =
             columns.join(", ") & ") VALUES (" & placeholders.join(", ") & ")"
   result = (sql, values)
 
-proc buildUpdateSql(cs: auto, meta: SchemaMeta): (string, seq[string]) =
+template buildUpdateSql(cs: auto, meta: SchemaMeta): (string, seq[string]) =
   ## Генерира UPDATE SQL от changeset и schema metadata.
-  var sets: seq[string] = @[]
-  var values: seq[string] = @[]
-  var idx = 1
+  ## Template за да резолвира `getFieldValRuntime` (generated per-schema).
+  mixin getFieldValRuntime
+  block:
+    var sets: seq[string] = @[]
+    var values: seq[string] = @[]
+    var idx = 1
 
-  for key, val in cs.changes.pairs():
-    var f: FieldMeta
-    var found = false
-    for fm in meta.fields:
-      if fm.name == key:
-        f = fm
-        found = true
-        break
-    if not found or f.virtual or f.primaryKey:
-      continue
-    sets.add("\"" & f.dbColumn & "\" = $" & $idx)
-    values.add(val)
-    inc idx
-
-  for f in meta.fields:
-    if f.isTimestamp and f.name == "updated_at" and not cs.changes.hasKey(f.name):
-      let nowStr = dumpValue(now())
+    for key, val in cs.changes.pairs():
+      var f: FieldMeta
+      var found = false
+      for fm in meta.fields:
+        if fm.name == key:
+          f = fm
+          found = true
+          break
+      if not found or f.virtual or f.primaryKey:
+        continue
       sets.add("\"" & f.dbColumn & "\" = $" & $idx)
-      values.add(nowStr)
+      values.add(val)
       inc idx
 
-  var pkVal: string = ""
-  for f in meta.fields:
-    if f.primaryKey:
-      if cs.changes.hasKey(f.name):
-        pkVal = cs.changes[f.name]
-      break
+    for f in meta.fields:
+      if f.isTimestamp and f.name == "updated_at" and not cs.changes.hasKey(f.name):
+        let nowStr = dumpValue(now())
+        sets.add("\"" & f.dbColumn & "\" = $" & $idx)
+        values.add(nowStr)
+        inc idx
 
-  if pkVal.len == 0:
-    raise newException(ValidationError, "Cannot update without primary key value")
+    var pkVal: string = ""
+    for f in meta.fields:
+      if f.primaryKey:
+        if cs.changes.hasKey(f.name):
+          pkVal = cs.changes[f.name]
+        break
 
-  values.add(pkVal)
-  let whereClause = "\"" & meta.primaryKeyField & "\" = $" & $idx
+    # Also look up PK from the original data if not in changes
+    if pkVal.len == 0:
+      for f in meta.fields:
+        if f.primaryKey:
+          try:
+            pkVal = getFieldValRuntime(cs.data, f.name)
+          except:
+            discard
+          break
 
-  let sql = "UPDATE \"" & meta.tableName & "\" SET " &
-            sets.join(", ") & " WHERE " & whereClause
-  result = (sql, values)
+    if pkVal.len == 0:
+      raise newException(ValidationError, "Cannot update without primary key value")
+
+    # No changes to apply — return empty SQL to signal skip
+    if sets.len == 0:
+      ("", @[])
+    else:
+      values.add(pkVal)
+      let whereClause = "\"" & meta.primaryKeyField & "\" = $" & $idx
+      let sql = "UPDATE \"" & meta.tableName & "\" SET " &
+                sets.join(", ") & " WHERE " & whereClause
+      (sql, values)
 
 proc buildDeleteSql(cs: auto, meta: SchemaMeta): (string, seq[string]) =
   ## Генерира DELETE SQL от changeset и schema metadata.
@@ -316,7 +332,7 @@ proc parseConstraintName*(errorMsg: string): string =
   ## Извлича името на constraint от PostgreSQL грешка.
   let idx = errorMsg.find("violates ")
   if idx >= 0:
-    let after = errorMsg[idx + 9 .. ^1]
+    let after = errorMsg[idx + 8 .. ^1]
     let start = after.find('"')
     let endPos = after.find('"', start + 1)
     if start >= 0 and endPos > start:
@@ -401,6 +417,8 @@ template insert_all*(repo: Repo, changesets: auto): auto =
         var idx = 1
 
         let firstCs = changesets[0]
+        # Collect column names in deterministic (sorted) order
+        var orderedFields: seq[(string, FieldMeta)] = @[]
         for key, val in firstCs.changes.pairs():
           var fieldKnown = false
           var f: FieldMeta
@@ -411,7 +429,17 @@ template insert_all*(repo: Repo, changesets: auto): auto =
               break
           if not fieldKnown or f.virtual:
             continue
+          orderedFields.add((key, f))
           columns.add("\"" & f.dbColumn & "\"")
+
+        # Sort by field name for deterministic ordering
+        orderedFields.sort do (a, b: (string, FieldMeta)) -> int:
+          cmp(a[0], b[0])
+
+        # Rebuild columns from sorted order
+        columns = @[]
+        for pair in orderedFields:
+          columns.add("\"" & pair[1].dbColumn & "\"")
 
         var timestampCols: seq[FieldMeta] = @[]
         for f in meta.fields:
@@ -419,20 +447,23 @@ template insert_all*(repo: Repo, changesets: auto): auto =
             timestampCols.add(f)
             columns.add("\"" & f.dbColumn & "\"")
 
+        # Build a set of valid fields from firstCs for quick lookup
+        var validFields: seq[string] = @[]
+        for pair in orderedFields:
+          validFields.add(pair[0])
+        for f in timestampCols:
+          validFields.add(f.name)
+
         var rowGroups: seq[string] = @[]
         for cs in changesets:
           var rowPlaceholders: seq[string] = @[]
-          for key, val in cs.changes.pairs():
-            var fieldKnown = false
-            for f in meta.fields:
-              if f.name == key:
-                fieldKnown = true
-                break
-            if not fieldKnown:
-              continue
-            rowPlaceholders.add("$" & $idx)
-            allValues.add(val)
-            inc idx
+          # Use sorted field order, not hash table iteration
+          for pair in orderedFields:
+            let key = pair[0]
+            if cs.changes.hasKey(key):
+              rowPlaceholders.add("$" & $idx)
+              allValues.add(cs.changes[key])
+              inc idx
           for f in timestampCols:
             rowPlaceholders.add("$" & $idx)
             allValues.add(dumpValue(now()))
@@ -565,20 +596,50 @@ template update*[T](repo: Repo, cs: Changeset[T]): T =
     try:
       let meta = schemaMeta(T)
       let (sql, args) = buildUpdateSql(cs, meta)
-      repo.adapter.exec(conn, sql, args)
-      var pkVal: string = ""
-      for f in meta.fields:
-        if f.primaryKey:
-          if cs.changes.hasKey(f.name):
-            pkVal = cs.changes[f.name]
-          break
-      let loadSql = "SELECT * FROM \"" & meta.tableName &
-                    "\" WHERE \"" & meta.primaryKeyField & "\" = $1"
-      let rows = repo.adapter.query(conn, loadSql, @[pkVal])
-      if rows.len > 0:
-        load(rows[0], T)
+      # No changes to apply — just reload and return
+      if sql.len == 0:
+        var pkVal: string = ""
+        for f in meta.fields:
+          if f.primaryKey:
+            try:
+              pkVal = getFieldValRuntime(cs.data, f.name)
+            except:
+              if cs.changes.hasKey(f.name):
+                pkVal = cs.changes[f.name]
+            break
+        if pkVal.len > 0:
+          let loadSql = "SELECT * FROM \"" & meta.tableName &
+                        "\" WHERE \"" & meta.primaryKeyField & "\" = $1"
+          let rows = repo.adapter.query(conn, loadSql, @[pkVal])
+          if rows.len > 0:
+            load(rows[0], T)
+          else:
+            cs.data
+        else:
+          cs.data
       else:
-        cs.data
+        repo.adapter.exec(conn, sql, args)
+        var pkVal: string = ""
+        for f in meta.fields:
+          if f.primaryKey:
+            if cs.changes.hasKey(f.name):
+              pkVal = cs.changes[f.name]
+            break
+        if pkVal.len == 0:
+          for f in meta.fields:
+            if f.primaryKey:
+              try:
+                pkVal = getFieldValRuntime(cs.data, f.name)
+              except:
+                discard
+              break
+        let loadSql = "SELECT * FROM \"" & meta.tableName &
+                      "\" WHERE \"" & meta.primaryKeyField & "\" = $1"
+        let rows = repo.adapter.query(conn, loadSql, @[pkVal])
+        if rows.len > 0:
+          load(rows[0], T)
+        else:
+          cs.data
     except DatabaseError as e:
       var cs2 = cs
       handleConstraintError(cs2, e.msg)
