@@ -1,10 +1,12 @@
 ## Necto PostgreSQL Adapter
 ##
-## Имплементация върху db_connector/db_postgres.
+## Имплементация върху db_connector/db_postgres + libpq (low-level).
 ## Предоставя connection pooling и правилно mapping на Row типове.
+## Всички заявки използват pqexecParams за истински $N parameter binding.
 
 import std/[locks, deques, strutils]
 import db_connector/db_postgres as pg
+import db_connector/postgres as libpq
 import ./base
 
 export base
@@ -71,6 +73,60 @@ proc checkin*(a: PostgresAdapter, conn: pg.DbConn) =
   withLock a.poolLock:
     a.pool.addLast(conn)
 
+# --- Low-level parameter binding helpers ---
+
+proc pgQuery(db: pg.DbConn, sql: string, args: seq[string]): libpq.PPGresult =
+  ## Изпълнява SQL с $N placeholders през pqexecParams.
+  var arr = allocCStringArray(args)
+  defer: deallocCStringArray(arr)
+  result = libpq.pqexecParams(db, sql.cstring, int32(args.len), nil, arr, nil, nil, 0)
+
+proc pgExec(db: pg.DbConn, sql: string, args: seq[string]) =
+  let res = pgQuery(db, sql, args)
+  defer: libpq.pqclear(res)
+  let status = libpq.pqresultStatus(res)
+  if status != libpq.PGRES_COMMAND_OK and status != libpq.PGRES_TUPLES_OK:
+    raise newException(DatabaseError, $libpq.pqErrorMessage(db))
+
+proc pgSelect(db: pg.DbConn, sql: string, args: seq[string]): seq[DbRow] =
+  let res = pgQuery(db, sql, args)
+  defer: libpq.pqclear(res)
+  if libpq.pqresultStatus(res) != libpq.PGRES_TUPLES_OK:
+    raise newException(DatabaseError, $libpq.pqErrorMessage(db))
+  let nrows = libpq.pqntuples(res)
+  let ncols = libpq.pqnfields(res)
+  for i in 0 ..< nrows:
+    var row: DbRow = @[]
+    for j in 0 ..< ncols:
+      let cval = libpq.pqgetvalue(res, i, j)
+      if cval == nil:
+        row.add("")
+      else:
+        row.add($cval)
+    result.add(row)
+
+proc pgScalar(db: pg.DbConn, sql: string, args: seq[string]): string =
+  let res = pgQuery(db, sql, args)
+  defer: libpq.pqclear(res)
+  if libpq.pqresultStatus(res) != libpq.PGRES_TUPLES_OK:
+    raise newException(DatabaseError, $libpq.pqErrorMessage(db))
+  if libpq.pqntuples(res) > 0 and libpq.pqnfields(res) > 0:
+    let cval = libpq.pqgetvalue(res, 0, 0)
+    if cval != nil:
+      result = $cval
+
+proc pgAffected(db: pg.DbConn, sql: string, args: seq[string]): int64 =
+  let res = pgQuery(db, sql, args)
+  defer: libpq.pqclear(res)
+  let status = libpq.pqresultStatus(res)
+  if status != libpq.PGRES_COMMAND_OK and status != libpq.PGRES_TUPLES_OK:
+    raise newException(DatabaseError, $libpq.pqErrorMessage(db))
+  let ct = libpq.pqcmdTuples(res)
+  if ct != nil:
+    result = parseBiggestInt($ct)
+  else:
+    result = 0
+
 # --- Adapter имплементация ---
 
 method connect*(a: PostgresAdapter): Connection =
@@ -89,43 +145,43 @@ method query*(a: PostgresAdapter, conn: Connection, sql: string,
               args: seq[string] = @[]): seq[DbRow] =
   ## Изпълнява SELECT заявка и връща редовете.
   let pgConn = PgConnection(conn)
-  let pgQuery = pg.sql(sql)
-  var dbRows: seq[DbRow] = @[]
-  for row in pgConn.dbConn.fastRows(pgQuery, args):
-    var dbRow: DbRow = @[]
-    for i in 0..<row.len:
-      dbRow.add(row[i])
-    dbRows.add(dbRow)
-  dbRows
+  pgSelect(pgConn.dbConn, sql, args)
 
 method exec*(a: PostgresAdapter, conn: Connection, sql: string,
              args: seq[string] = @[]) =
   ## Изпълнява DDL/DML заявка (CREATE, INSERT, UPDATE, DELETE).
   let pgConn = PgConnection(conn)
-  let pgQuery = pg.sql(sql)
-  pgConn.dbConn.exec(pgQuery, args)
+  pgExec(pgConn.dbConn, sql, args)
 
 method execAffected*(a: PostgresAdapter, conn: Connection, sql: string,
                      args: seq[string] = @[]): int64 =
   ## Изпълнява заявка и връща брой засегнати редове (за UPDATE/DELETE).
   let pgConn = PgConnection(conn)
-  let pgQuery = pg.sql(sql)
-  pgConn.dbConn.execAffectedRows(pgQuery, args)
+  pgAffected(pgConn.dbConn, sql, args)
 
 method scalar*(a: PostgresAdapter, conn: Connection, sql: string,
                args: seq[string] = @[]): string =
   ## Изпълнява заявка и връща първата колона от първия ред.
   let pgConn = PgConnection(conn)
-  let pgQuery = pg.sql(sql)
-  pgConn.dbConn.getValue(pgQuery, args)
+  pgScalar(pgConn.dbConn, sql, args)
 
 method insertReturning*(a: PostgresAdapter, conn: Connection,
                         sql: string, pkName: string,
                         args: seq[string] = @[]): int64 =
   ## Изпълнява INSERT ... RETURNING pk и връща генерирания ID.
   let pgConn = PgConnection(conn)
-  let pgQuery = pg.sql(sql & " RETURNING " & pkName)
-  pgConn.dbConn.getValue(pgQuery, args).parseInt()
+  let res = pgQuery(pgConn.dbConn, sql & " RETURNING " & pkName, args)
+  defer: libpq.pqclear(res)
+  if libpq.pqresultStatus(res) != libpq.PGRES_TUPLES_OK:
+    raise newException(DatabaseError, $libpq.pqErrorMessage(pgConn.dbConn))
+  if libpq.pqntuples(res) > 0 and libpq.pqnfields(res) > 0:
+    let cval = libpq.pqgetvalue(res, 0, 0)
+    if cval != nil:
+      result = parseBiggestInt($cval)
+    else:
+      raise newException(DatabaseError, "insertReturning: nil value returned")
+  else:
+    raise newException(DatabaseError, "insertReturning: no rows returned")
 
 method beginTransaction*(a: PostgresAdapter, conn: Connection) =
   a.exec(conn, "BEGIN", @[])

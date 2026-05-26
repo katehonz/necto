@@ -11,7 +11,7 @@
 ##     pool_size 10
 ##
 ## Употреба:
-##   AppRepo.all(Query.from(User).where("age", Gt, "18"))
+##   AppRepo.all(Query.fromSchema(User).where("age", Gt, "18"))
 ##   AppRepo.insert(userChangeset)
 
 import std/[macros, options, strutils]
@@ -34,10 +34,20 @@ type
 proc newRepo*(adapter: Adapter): Repo =
   Repo(adapter: adapter)
 
+# --- Thread-local connection context (за транзакции) ---
+
+var threadLocalConn {.threadvar.}: Connection
+
 proc getConn(repo: Repo): Connection =
-  repo.adapter.connect()
+  ## Взема връзка. Ако сме в транзакция, връща същата връзка.
+  if threadLocalConn != nil:
+    return threadLocalConn
+  result = repo.adapter.connect()
 
 proc releaseConn(repo: Repo, conn: Connection) =
+  ## Връща връзка в пула, освен ако е thread-local (транзакция).
+  if threadLocalConn != nil:
+    return
   repo.adapter.disconnect(conn)
 
 # --- Raw SQL API (procs — не зависят от schema) ---
@@ -74,8 +84,8 @@ template all*[T](repo: Repo, q: Query[T]): seq[T] =
   block:
     let conn = repo.getConn()
     try:
-      let sql = q.toSql()
-      let rows = repo.adapter.query(conn, sql, @[])
+      let bq = q.toBoundQuery()
+      let rows = repo.adapter.query(conn, bq.sql, bq.args)
       var res: seq[T] = @[]
       for row in rows:
         res.add(load(row, T))
@@ -91,8 +101,8 @@ template one*[T](repo: Repo, q: Query[T]): Option[T] =
     try:
       var q2 = q
       q2 = q2.limit(1)
-      let sql = q2.toSql()
-      let rows = repo.adapter.query(conn, sql, @[])
+      let bq = q2.toBoundQuery()
+      let rows = repo.adapter.query(conn, bq.sql, bq.args)
       if rows.len > 0:
         some(load(rows[0], T))
       else:
@@ -106,11 +116,12 @@ template count*[T](repo: Repo, q: Query[T]): int64 =
   block:
     let conn = repo.getConn()
     try:
-      var cq = q
-      cq.selectFields = @[]
-      let baseSql = cq.toSql()
-      let countSql = baseSql.replace("*", "COUNT(*)")
-      let val = repo.adapter.scalar(conn, countSql, @[])
+      let meta = schemaMeta(T)
+      var bq = q.toBoundQuery()
+      # Заменяме SELECT ... с SELECT COUNT(*)
+      let fromIdx = bq.sql.find(" FROM ")
+      let countSql = "SELECT COUNT(*)" & bq.sql[fromIdx..^1]
+      let val = repo.adapter.scalar(conn, countSql, bq.args)
       if val.len > 0:
         parseBiggestInt(val)
       else:
@@ -301,19 +312,20 @@ proc `delete!`*[T](repo: Repo, cs: Changeset[T]): T =
 
 proc transaction*(repo: Repo, body: proc()) =
   ## Изпълнява блок в транзакция.
-  let conn = repo.getConn()
+  ## Всички repo операции вътре в body ползват една и съща връзка.
+  let conn = repo.adapter.connect()
+  let prevConn = threadLocalConn
+  threadLocalConn = conn
   try:
     repo.adapter.beginTransaction(conn)
     body()
     repo.adapter.commitTransaction(conn)
-  except RollbackError:
-    repo.adapter.rollbackTransaction(conn)
-    raise
   except:
     repo.adapter.rollbackTransaction(conn)
     raise
   finally:
-    repo.releaseConn(conn)
+    threadLocalConn = prevConn
+    repo.adapter.disconnect(conn)
 
 # --- Макро за дефиниране на Repo ---
 

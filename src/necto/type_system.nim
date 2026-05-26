@@ -58,26 +58,33 @@ proc loadValue*(val: string, T: typedesc[float]): float =
 proc loadValue*(val: string, T: typedesc[bool]): bool =
   val == "t" or val == "true" or val == "1" or val == "TRUE"
 
+proc normalizePgTimestamp(val: string): string =
+  ## Нормализира PostgreSQL timestamp за Nim times.parse.
+  ## - Маха fractional seconds (Nim 'fff' е strict)
+  ## - Добавя :00 към timezone ако е само +HH / -HH
+  result = val
+  let dotIdx = result.find('.')
+  if dotIdx >= 0:
+    var i = dotIdx + 1
+    while i < result.len and result[i] in {'0'..'9'}:
+      inc i
+    result = result[0 ..< dotIdx] & result[i .. ^1]
+  if result.len >= 3 and result[^3] in {'+', '-'}:
+    result.add(":00")
+
 proc loadValue*(val: string, T: typedesc[DateTime]): DateTime =
   ## Load DateTime от PostgreSQL timestamp string.
   if val.len == 0:
     result = fromUnix(0).utc
     return
-  # PostgreSQL връща формат: 2026-05-26 12:34:56.789+02
-  # или: 2026-05-26 12:34:56.789012+02
+  let clean = normalizePgTimestamp(val)
   try:
-    result = parse(val, "yyyy-MM-dd HH:mm:ss'.'fffzzz")
+    result = parse(clean, "yyyy-MM-dd HH:mm:sszzz")
   except ValueError:
     try:
-      result = parse(val, "yyyy-MM-dd HH:mm:ss'.'ffffffzzz")
-    except ValueError:
-      try:
-        result = parse(val, "yyyy-MM-dd HH:mm:sszzz")
-      except ValueError:
-        try:
-          result = parse(val, "yyyy-MM-dd HH:mm:ss")
-        except:
-          raise newException(ValueError, "Cannot load DateTime: " & val)
+      result = parse(clean, "yyyy-MM-dd HH:mm:ss")
+    except:
+      raise newException(ValueError, "Cannot load DateTime: " & val & " (normalized: " & clean & ")")
 
 proc loadValue*[T](val: string, OptT: typedesc[Option[T]]): Option[T] =
   ## Load Option[T] — ако val е празен, връща none.

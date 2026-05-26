@@ -422,6 +422,7 @@ macro necto_schema*(name: untyped, body: untyped): untyped =
   # --- Генериране на конструктор ---
   let newProcName = newIdentNode("new" & schemaName)
   let newProcBody = newStmtList()
+  newProcBody.add(nnkAsgn.newTree(newIdentNode("result"), newCall(typeName)))
   for ca in constructorAssignments:
     newProcBody.add(ca)
 

@@ -4,10 +4,10 @@
 ##
 ## Пример:
 ##   Query.fromSchema(User)
-##     .where(it.age >= 18)
-##     .order_by(it.name.asc)
+##     .where("age", Gte, "18")
+##     .orderBy("name", Asc)
 ##     .limit(10)
-##     .select(it.id, it.name)
+##     .select("id", "name")
 
 import std/[macros, strutils, options, tables]
 import ./schema
@@ -47,6 +47,11 @@ type
     distinctVal*: bool
     preloadAssocs*: seq[string]
 
+  BoundQuery* = object
+    ## SQL с $N placeholders + отделени аргументи.
+    sql*: string
+    args*: seq[string]
+
 # --- Конструктори ---
 
 proc fromSchema*[T](typ: typedesc[T]): Query[T] =
@@ -83,12 +88,16 @@ proc preload*[T](q: Query[T], assoc: string): Query[T] =
   result = q
   result.preloadAssocs.add(assoc)
 
-# --- SQL Генерация (placeholder за query_builder.nim) ---
+# --- SQL Генерация с parameter binding ---
 
-proc toSql*[T](q: Query[T]): string =
-  ## Превръща Query в SQL низ. За MVP — опростена имплементация.
+template toBoundQuery*[T](q: Query[T]): BoundQuery =
+  ## Превръща Query в SQL с `$N` placeholders + seq от стойности.
+  ## Template за да резолвира schemaMeta(T) в scope-а на извикване.
+  mixin schemaMeta
   let meta = schemaMeta(T)
   var parts: seq[string] = @[]
+  var args: seq[string] = @[]
+  var idx = 1
 
   parts.add("SELECT")
   if q.distinctVal:
@@ -100,27 +109,53 @@ proc toSql*[T](q: Query[T]): string =
     parts.add("*")
 
   parts.add("FROM")
-  parts.add(meta.tableName)
+  parts.add("\"" & meta.tableName & "\"")
 
   if q.whereClauses.len > 0:
     parts.add("WHERE")
     var wheres: seq[string] = @[]
-    var idx = 1
     for w in q.whereClauses:
-      let placeholder = "$" & $idx
       case w.op
-      of Eq: wheres.add(w.field & " = " & placeholder)
-      of Ne: wheres.add(w.field & " != " & placeholder)
-      of Gt: wheres.add(w.field & " > " & placeholder)
-      of Gte: wheres.add(w.field & " >= " & placeholder)
-      of Lt: wheres.add(w.field & " < " & placeholder)
-      of Lte: wheres.add(w.field & " <= " & placeholder)
-      of Like: wheres.add(w.field & " LIKE " & placeholder)
-      of Ilike: wheres.add(w.field & " ILIKE " & placeholder)
-      of In: wheres.add(w.field & " IN (" & placeholder & ")")
-      of IsNull: wheres.add(w.field & " IS NULL")
-      of NotNull: wheres.add(w.field & " IS NOT NULL")
-      inc idx
+      of Eq:
+        wheres.add("\"" & w.field & "\" = $" & $idx)
+        args.add(w.value)
+        inc idx
+      of Ne:
+        wheres.add("\"" & w.field & "\" != $" & $idx)
+        args.add(w.value)
+        inc idx
+      of Gt:
+        wheres.add("\"" & w.field & "\" > $" & $idx)
+        args.add(w.value)
+        inc idx
+      of Gte:
+        wheres.add("\"" & w.field & "\" >= $" & $idx)
+        args.add(w.value)
+        inc idx
+      of Lt:
+        wheres.add("\"" & w.field & "\" < $" & $idx)
+        args.add(w.value)
+        inc idx
+      of Lte:
+        wheres.add("\"" & w.field & "\" <= $" & $idx)
+        args.add(w.value)
+        inc idx
+      of Like:
+        wheres.add("\"" & w.field & "\" LIKE $" & $idx)
+        args.add(w.value)
+        inc idx
+      of Ilike:
+        wheres.add("\"" & w.field & "\" ILIKE $" & $idx)
+        args.add(w.value)
+        inc idx
+      of In:
+        wheres.add("\"" & w.field & "\" IN ($" & $idx & ")")
+        args.add(w.value)
+        inc idx
+      of IsNull:
+        wheres.add("\"" & w.field & "\" IS NULL")
+      of NotNull:
+        wheres.add("\"" & w.field & "\" IS NOT NULL")
     parts.add(wheres.join(" AND "))
 
   if q.orderClauses.len > 0:
@@ -128,25 +163,26 @@ proc toSql*[T](q: Query[T]): string =
     var orders: seq[string] = @[]
     for o in q.orderClauses:
       let dirStr = if o.dir == Asc: "ASC" else: "DESC"
-      orders.add(o.field & " " & dirStr)
+      orders.add("\"" & o.field & "\" " & dirStr)
     parts.add(orders.join(", "))
 
   if q.limitVal.isSome:
-    parts.add("LIMIT " & $q.limitVal.get)
+    parts.add("LIMIT $" & $idx)
+    args.add($q.limitVal.get)
+    inc idx
 
   if q.offsetVal.isSome:
-    parts.add("OFFSET " & $q.offsetVal.get)
+    parts.add("OFFSET $" & $idx)
+    args.add($q.offsetVal.get)
+    inc idx
 
-  parts.join(" ")
+  BoundQuery(sql: parts.join(" "), args: args)
+
+template toSql*[T](q: Query[T]): string =
+  ## Само SQL низ (без аргументи). За debug/legacy употреба.
+  toBoundQuery(q).sql
 
 # --- Макро за type-safe where (бъдеще) ---
-##
-## Идея:
-##   Query.from(User).where(it.age >= 18)
-##
-## Nim макро ще трансформира `it.age >= 18` в:
-##   where("age", Gte, "18")
-## с type checking по време на компилация.
 
 macro whereIt*(q: untyped, expr: untyped): untyped =
   ## Placeholder за бъдещо `it` захващане.
