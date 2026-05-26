@@ -38,13 +38,13 @@ proc newRepo*(adapter: Adapter): Repo =
 
 var threadLocalConn {.threadvar.}: Connection
 
-proc getConn(repo: Repo): Connection =
+proc getConn*(repo: Repo): Connection =
   ## Взема връзка. Ако сме в транзакция, връща същата връзка.
   if threadLocalConn != nil:
     return threadLocalConn
   result = repo.adapter.connect()
 
-proc releaseConn(repo: Repo, conn: Connection) =
+proc releaseConn*(repo: Repo, conn: Connection) =
   ## Връща връзка в пула, освен ако е thread-local (транзакция).
   if threadLocalConn != nil:
     return

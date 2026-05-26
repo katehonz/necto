@@ -296,6 +296,16 @@ macro necto_schema*(name: untyped, body: untyped): untyped =
           result.`fkId` = loadValue(row[`idx`], int64)
         )
 
+        # AssocMeta
+        assocMetaNodes.add(nnkObjConstr.newTree(
+          newIdentNode("AssocMeta"),
+          nnkExprColonExpr.newTree(newIdentNode("name"), newLit(assocName)),
+          nnkExprColonExpr.newTree(newIdentNode("kind"), newIdentNode("akBelongsTo")),
+          nnkExprColonExpr.newTree(newIdentNode("targetSchema"), newLit(assocType)),
+          nnkExprColonExpr.newTree(newIdentNode("foreignKey"), newLit(fkField)),
+          nnkExprColonExpr.newTree(newIdentNode("ownerKey"), newLit("id"))
+        ))
+
       elif cmdName == "has_many":
         ## AST: Command(Ident "has_many", Ident "assocName", StmtList(Ident "TargetType"))
         let assocName = $child[1]
@@ -309,7 +319,7 @@ macro necto_schema*(name: untyped, body: untyped): untyped =
         constructorAssignments.add(
           nnkAsgn.newTree(
             nnkDotExpr.newTree(newIdentNode("result"), newIdentNode(assocName)),
-            newTree(nnkBracket)
+            newCall(newIdentNode("@"), newTree(nnkBracket))
           )
         )
 
@@ -417,7 +427,7 @@ macro necto_schema*(name: untyped, body: untyped): untyped =
     )
   )
   for am in assocMetaNodes:
-    schemaMetaLet[0][2][1][^1][1][1].add(am)
+    schemaMetaLet[0][2][^1][1][1].add(am)
 
   # --- Генериране на конструктор ---
   let newProcName = newIdentNode("new" & schemaName)
@@ -456,6 +466,58 @@ macro necto_schema*(name: untyped, body: untyped): untyped =
     loadProcBody
   )
 
+  # --- Генериране на getFieldVal template ---
+  var getFieldWhenBranches: seq[NimNode] = @[]
+  for fd in fieldDefs:
+    let fieldId = fd[0]
+    let fieldNameStr = if fieldId.kind == nnkIdent: $fieldId else: $fieldId[0]
+    let cond = nnkInfix.newTree(newIdentNode("=="), newIdentNode("fieldName"), newLit(fieldNameStr))
+    let body = nnkDotExpr.newTree(newIdentNode("obj"), fieldId)
+    getFieldWhenBranches.add(newTree(nnkElifBranch, cond, body))
+  let getFieldWhenStmt = newTree(nnkWhenStmt, getFieldWhenBranches)
+
+  var getFieldTemplate = newTree(nnkTemplateDef,
+    newTree(nnkPostfix, newIdentNode("*"), newIdentNode("getFieldVal")),
+    newEmptyNode(),
+    newEmptyNode(),
+    newTree(nnkFormalParams,
+      newIdentNode("untyped"),
+      newTree(nnkIdentDefs, newIdentNode("obj"), typeName, newEmptyNode()),
+      newTree(nnkIdentDefs, newIdentNode("fieldName"), newTree(nnkBracketExpr, newIdentNode("static"), newIdentNode("string")), newEmptyNode())
+    ),
+    newEmptyNode(),
+    newEmptyNode(),
+    getFieldWhenStmt
+  )
+
+  # --- Генериране на setFieldVal template ---
+  var setFieldWhenBranches: seq[NimNode] = @[]
+  for fd in fieldDefs:
+    let fieldId = fd[0]
+    let fieldNameStr = if fieldId.kind == nnkIdent: $fieldId else: $fieldId[0]
+    let cond = nnkInfix.newTree(newIdentNode("=="), newIdentNode("fieldName"), newLit(fieldNameStr))
+    let body = nnkAsgn.newTree(nnkDotExpr.newTree(newIdentNode("obj"), fieldId), newIdentNode("value"))
+    setFieldWhenBranches.add(newTree(nnkElifBranch, cond, body))
+  setFieldWhenBranches.add(newTree(nnkElse,
+    newTree(nnkStaticStmt, newCall(newIdentNode("error"), newLit("Unknown field for set: " & schemaName & ".")))))
+
+  let setFieldWhenStmt = newTree(nnkWhenStmt, setFieldWhenBranches)
+
+  var setFieldTemplate = newTree(nnkTemplateDef,
+    newTree(nnkPostfix, newIdentNode("*"), newIdentNode("setFieldVal")),
+    newEmptyNode(),
+    newEmptyNode(),
+    newTree(nnkFormalParams,
+      newEmptyNode(),
+      newTree(nnkIdentDefs, newIdentNode("obj"), newTree(nnkVarTy, typeName), newEmptyNode()),
+      newTree(nnkIdentDefs, newIdentNode("fieldName"), newTree(nnkBracketExpr, newIdentNode("static"), newIdentNode("string")), newEmptyNode()),
+      newTree(nnkIdentDefs, newIdentNode("value"), newIdentNode("untyped"), newEmptyNode())
+    ),
+    newEmptyNode(),
+    newEmptyNode(),
+    setFieldWhenStmt
+  )
+
   # --- Генериране на typedesc dispatch за schemaMeta и load ---
   let dispatchProcs = quote do:
     proc schemaMeta*(T: typedesc[`typeName`]): SchemaMeta =
@@ -470,6 +532,39 @@ macro necto_schema*(name: untyped, body: untyped): untyped =
   result.add(schemaMetaLet)
   result.add(newProc)
   result.add(loadProc)
+  result.add(getFieldTemplate)
+  result.add(setFieldTemplate)
+
+  # --- Генериране на getFieldValRuntime proc (runtime string field access) ---
+  var getFieldRuntimeCaseBranches: seq[NimNode] = @[]
+  for fm in fieldMetaNodes:
+    let fieldNameNode = fm[1][1]
+    let fieldNameStr = $fieldNameNode
+    let fieldId = newIdentNode(fieldNameStr)
+    let ofBranch = newTree(nnkOfBranch, fieldNameNode,
+      newCall(newIdentNode("$"), nnkDotExpr.newTree(newIdentNode("obj"), fieldId)))
+    getFieldRuntimeCaseBranches.add(ofBranch)
+  getFieldRuntimeCaseBranches.add(newTree(nnkElse, newLit("")))
+
+  var getFieldRuntimeCaseStmt = newTree(nnkCaseStmt, newIdentNode("fieldName"))
+  for b in getFieldRuntimeCaseBranches:
+    getFieldRuntimeCaseStmt.add(b)
+
+  var getFieldRuntimeProc = newTree(nnkProcDef,
+    newTree(nnkPostfix, newIdentNode("*"), newIdentNode("getFieldValRuntime")),
+    newEmptyNode(),
+    newEmptyNode(),
+    newTree(nnkFormalParams,
+      newIdentNode("string"),
+      newTree(nnkIdentDefs, newIdentNode("obj"), typeName, newEmptyNode()),
+      newTree(nnkIdentDefs, newIdentNode("fieldName"), newIdentNode("string"), newEmptyNode())
+    ),
+    newEmptyNode(),
+    newEmptyNode(),
+    getFieldRuntimeCaseStmt
+  )
+  result.add(getFieldRuntimeProc)
+
   result.add(dispatchProcs)
   for cf in changesetFuncs:
     result.add(cf)
