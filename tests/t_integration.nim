@@ -197,6 +197,31 @@ suite "Integration: Schema + Query + Changeset + CRUD":
     let users = testrepoInstance.insert_all(empty)
     check(users.len == 0)
 
+  test "insert_all raw entries batch inserts without changesets":
+    let entries = @[
+      {"name": "Raw1", "email": "raw1@test.com", "age": "21"}.toTable,
+      {"name": "Raw2", "email": "raw2@test.com", "age": "22"}.toTable,
+      {"name": "Raw3", "email": "raw3@test.com", "age": "23"}.toTable
+    ]
+    let users = testrepoInstance.insert_all(User, entries)
+    check(users.len == 3)
+    check(users[0].name == "Raw1")
+    check(users[1].name == "Raw2")
+    check(users[2].name == "Raw3")
+    check(users[0].email == "raw1@test.com")
+    check(users[1].age == 22)
+    check(users[2].id > 0)
+
+    let allUsers = testrepoInstance.all(fromSchema(User).orderBy("id", Asc))
+    check(allUsers.len == 3)
+    check(allUsers[0].name == "Raw1")
+    check(allUsers[1].name == "Raw2")
+
+  test "insert_all raw entries with empty seq returns empty":
+    let empty: seq[Table[string, string]] = @[]
+    let users = testrepoInstance.insert_all(User, empty)
+    check(users.len == 0)
+
   test "update_all updates matching records":
     for name in @["A", "B", "C"]:
       var cs = newChangeset(newUser(), {"name": name, "active": "true"}.toTable)

@@ -501,6 +501,69 @@ template insert_all*(repo: Repo, changesets: auto): auto =
       finally:
         repo.releaseConn(conn)
 
+template insert_all*[T](repo: Repo, typ: typedesc[T], entries: seq[Table[string, string]]): seq[T] =
+  ## Batch insert на raw entries без changeset.
+  ## Валидира стойностите спрямо schema meta и връща заредените записи.
+  ## Пример:
+  ##   repo.insert_all(User, @[{"name": "Ivan"}.toTable, {"name": "Maria"}.toTable])
+  mixin schemaMeta, load, castToDb
+  block:
+    if entries.len == 0:
+      @[]
+    else:
+      let conn = repo.getConn()
+      try:
+        let meta = schemaMeta(T)
+
+        # Определяме валидните полета (без auto_increment PK, виртуални и timestamps)
+        var validFields: seq[FieldMeta] = @[]
+        for f in meta.fields:
+          if f.virtual or f.isTimestamp:
+            continue
+          if f.primaryKey and f.autoIncrement:
+            continue
+          validFields.add(f)
+
+        # Сортираме за детерминистична поръчка
+        validFields.sort do (a, b: FieldMeta) -> int:
+          cmp(a.name, b.name)
+
+        # Строим колоните
+        var columns: seq[string] = @[]
+        for f in validFields:
+          columns.add("\"" & f.dbColumn & "\"")
+
+        var allValues: seq[string] = @[]
+        var idx = 1
+        var rowGroups: seq[string] = @[]
+
+        for entry in entries:
+          var rowPlaceholders: seq[string] = @[]
+          for f in validFields:
+            let rawVal = if entry.hasKey(f.name): entry[f.name] else: ""
+            let casted = castToDb(rawVal, f.nimType)
+            rowPlaceholders.add("$" & $idx)
+            allValues.add(casted)
+            inc idx
+          rowGroups.add("(" & rowPlaceholders.join(", ") & ")")
+
+        let sql = "INSERT INTO \"" & meta.tableName & "\" (" &
+                  columns.join(", ") & ") VALUES " &
+                  rowGroups.join(", ") & " RETURNING *"
+
+        let rows = repo.adapter.query(conn, sql, allValues)
+        var res: seq[T] = @[]
+        for row in rows:
+          res.add(load(row, T))
+        res
+      except DatabaseError as e:
+        var ce = new(ConstraintError)
+        ce.msg = e.msg
+        ce.constraintName = ""
+        raise ce
+      finally:
+        repo.releaseConn(conn)
+
 proc renumberPlaceholders(sql: string, offset: int): string =
   ## Преименува $N placeholders с offset.
   ## Пример: renumberPlaceholders("WHERE x = $1 AND y = $2", 2) → "WHERE x = $3 AND y = $4"
