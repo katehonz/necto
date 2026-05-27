@@ -46,3 +46,10 @@ testresults/
 Thumbs.db
 tests/t_jsonb
 tests/t_read_replica
+tests/t_verify
+tests/t_query_verify
+tests/t_query_cache
+src/necto_verify
+src/necto/query.out
+src/necto/migrator.out
+benchmarks/necto_bench
