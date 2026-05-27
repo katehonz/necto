@@ -76,10 +76,15 @@ proc scalar*(repo: Repo, sql: string, args: seq[string] = @[]): string =
   finally:
     repo.releaseConn(conn)
 
+proc poolMetrics*(repo: Repo): PoolMetrics =
+  ## Връща метрики за connection pool-а.
+  repo.adapter.poolMetrics()
+
 # --- Query API (templates за lazy resolution на load/schemaMeta) ---
 
 template all*[T](repo: Repo, q: Query[T]): seq[T] =
   ## Изпълнява SELECT заявка и връща seq от резултати.
+  ## Ако Query има `.preload("...")`, асоциациите се зареждат автоматично.
   mixin load, schemaMeta
   block:
     let conn = repo.getConn()
@@ -89,12 +94,16 @@ template all*[T](repo: Repo, q: Query[T]): seq[T] =
       var res: seq[T] = @[]
       for row in rows:
         res.add(load(row, T))
+      if q.preloadAssocs.len > 0:
+        when compiles(autoPreloadAssocs(repo, res, q.preloadAssocs)):
+          autoPreloadAssocs(repo, res, q.preloadAssocs)
       res
     finally:
       repo.releaseConn(conn)
 
 template one*[T](repo: Repo, q: Query[T]): Option[T] =
   ## Връща един резултат или none.
+  ## Ако Query има `.preload("...")`, асоциациите се зареждат автоматично.
   mixin load
   block:
     let conn = repo.getConn()
@@ -104,7 +113,11 @@ template one*[T](repo: Repo, q: Query[T]): Option[T] =
       let bq = q2.toBoundQuery()
       let rows = repo.adapter.query(conn, bq.sql, bq.args)
       if rows.len > 0:
-        some(load(rows[0], T))
+        var res = @[load(rows[0], T)]
+        if q2.preloadAssocs.len > 0:
+          when compiles(autoPreloadAssocs(repo, res, q2.preloadAssocs)):
+            autoPreloadAssocs(repo, res, q2.preloadAssocs)
+        some(res[0])
       else:
         none(T)
     finally:

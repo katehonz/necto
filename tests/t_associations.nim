@@ -229,3 +229,95 @@ suite "Associations and Preload":
     )
     check(users.len == 1)
     check(users[0].profile.bio == "Auto bio")
+
+  test "Query preload automatically loads belongs_to via repo.all":
+    var userCs = newChangeset(newUser(), {"name": "QueryAuthor"}.toTable)
+    userCs = userCs.castFields(@["name"])
+    let author = testrepoInstance.insert(userCs)
+
+    for i in 1..2:
+      var pCs = newChangeset(newPost(), {"title": "QPost " & $i, "author_id": $author.id}.toTable)
+      pCs = pCs.castFields(@["title", "author_id"])
+      discard testrepoInstance.insert(pCs)
+
+    let posts = testrepoInstance.all(
+      fromSchema(Post).orderBy("id", Asc).preload("author")
+    )
+    check(posts.len == 2)
+    check(posts[0].author.name == "QueryAuthor")
+    check(posts[1].author.name == "QueryAuthor")
+
+  test "Query preload automatically loads has_many via repo.all":
+    var userCs = newChangeset(newUser(), {"name": "QueryMulti"}.toTable)
+    userCs = userCs.castFields(@["name"])
+    let u = testrepoInstance.insert(userCs)
+
+    for i in 1..3:
+      var pCs = newChangeset(newPost(), {"title": "QP " & $i, "author_id": $u.id}.toTable)
+      pCs = pCs.castFields(@["title", "author_id"])
+      discard testrepoInstance.insert(pCs)
+
+    let users = testrepoInstance.all(
+      fromSchema(User).where("name", Eq, "QueryMulti").preload("posts")
+    )
+    check(users.len == 1)
+    check(users[0].posts.len == 3)
+    check(users[0].posts[0].title == "QP 1")
+
+  test "Query preload automatically loads has_one via repo.all":
+    var userCs = newChangeset(newUser(), {"name": "QueryProfile"}.toTable)
+    userCs = userCs.castFields(@["name"])
+    let u = testrepoInstance.insert(userCs)
+
+    var profCs = newChangeset(newProfile(), {"bio": "Query bio", "user_id": $u.id}.toTable)
+    profCs = profCs.castFields(@["bio", "user_id"])
+    discard testrepoInstance.insert(profCs)
+
+    let users = testrepoInstance.all(
+      fromSchema(User).where("name", Eq, "QueryProfile").preload("profile")
+    )
+    check(users.len == 1)
+    check(users[0].profile.bio == "Query bio")
+
+  test "Query preload works via repo.one":
+    var userCs = newChangeset(newUser(), {"name": "OneAuthor"}.toTable)
+    userCs = userCs.castFields(@["name"])
+    let author = testrepoInstance.insert(userCs)
+
+    var pCs = newChangeset(newPost(), {"title": "OnePost", "author_id": $author.id}.toTable)
+    pCs = pCs.castFields(@["title", "author_id"])
+    discard testrepoInstance.insert(pCs)
+
+    let maybePost = testrepoInstance.one(
+      fromSchema(Post).where("title", Eq, "OnePost").preload("author")
+    )
+    check(maybePost.isSome)
+    check(maybePost.get.author.name == "OneAuthor")
+
+  test "build_assoc creates child with foreign key pre-filled":
+    var userCs = newChangeset(newUser(), {"name": "Builder"}.toTable)
+    userCs = userCs.castFields(@["name"])
+    let user = testrepoInstance.insert(userCs)
+
+    var postCs = build_assoc(user, Post, {"title": "Built Post", "body": "Built body"}.toTable)
+    postCs = postCs.castFields(@["title", "body", "author_id"])
+    check(postCs.isValid)
+    check(postCs.data.author_id == user.id)
+
+    let post = testrepoInstance.insert(postCs)
+    check(post.title == "Built Post")
+    check(post.author_id == user.id)
+
+  test "build_assoc works for has_one associations":
+    var userCs = newChangeset(newUser(), {"name": "ProfileBuilder"}.toTable)
+    userCs = userCs.castFields(@["name"])
+    let user = testrepoInstance.insert(userCs)
+
+    var profCs = build_assoc(user, Profile, {"bio": "Built bio"}.toTable)
+    profCs = profCs.castFields(@["bio", "user_id"])
+    check(profCs.isValid)
+    check(profCs.data.user_id == user.id)
+
+    let prof = testrepoInstance.insert(profCs)
+    check(prof.bio == "Built bio")
+    check(prof.user_id == user.id)

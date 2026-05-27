@@ -22,6 +22,38 @@ proc buildInPlaceholders(n: int): seq[string] =
   for i in 1..n:
     result.add("$" & $i)
 
+# --- build_assoc helper ---
+
+template build_assoc*[Parent, Child](parent: Parent, childType: typedesc[Child], params: Table[string, string] = initTable[string, string]()): Changeset[Child] =
+  ## Създава child changeset с попълнен foreign key към parent.
+  ## Търси belongs_to в Child метаданните за правилен FK.
+  mixin schemaMeta, newChangeset, setFieldValRuntime, getFieldValRuntime
+  block:
+    let parentMeta = schemaMeta(Parent)
+    let childMeta = schemaMeta(Child)
+
+    var fkField = ""
+    for a in childMeta.associations:
+      if a.kind == akBelongsTo and a.targetSchema == $Parent:
+        fkField = a.foreignKey
+        break
+
+    if fkField.len == 0:
+      for a in parentMeta.associations:
+        if (a.kind == akHasMany or a.kind == akHasOne) and a.targetSchema == $Child:
+          fkField = a.foreignKey
+          break
+
+    if fkField.len == 0:
+      raise newException(QueryError, "No association between " & $Parent & " and " & $Child)
+
+    var child = Child()
+    let pkVal = getFieldValRuntime(parent, parentMeta.primaryKeyField)
+    setFieldValRuntime(child, fkField, pkVal)
+    var cs = newChangeset(child, params)
+    cs.changes[fkField] = pkVal
+    cs
+
 # --- Preload: BelongsTo (Parent FK → Child PK) ---
 
 template preloadBelongsTo*[Parent, Child](repo: Repo, parents: seq[Parent]): Table[int64, Child] =

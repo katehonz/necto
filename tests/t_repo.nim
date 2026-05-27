@@ -75,3 +75,18 @@ suite "Repo CRUD integration":
       @["20"]
     )
     check(count == "1")
+
+  test "Pool metrics are tracked":
+    let before = testrepoInstance.poolMetrics()
+    check(before.totalRequests >= 0)
+
+    # Trigger some pool activity
+    for i in 1..3:
+      discard testrepoInstance.scalar("SELECT $1", @[$i])
+
+    let after = testrepoInstance.poolMetrics()
+    check(after.totalRequests > before.totalRequests)
+    check(after.totalWaitMs >= 0)
+    check(after.maxWaitMs >= 0)
+    check(after.peakActiveConns >= 0)
+    check(after.availableConns >= 0)

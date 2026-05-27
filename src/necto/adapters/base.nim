@@ -12,6 +12,15 @@ type
   DatabaseError* = object of CatchableError
     ## Грешка при работа с базата данни.
 
+  PoolMetrics* = object
+    ## Метрики за connection pool-а.
+    totalRequests*: int64
+    totalWaitMs*: float64
+    maxWaitMs*: float64
+    peakActiveConns*: int
+    poolExhaustedCount*: int64
+    availableConns*: int
+
   Adapter* = ref object of RootObj
     ## Абстрактен базов адаптер.
     host*: string
@@ -68,3 +77,7 @@ method commitTransaction*(a: Adapter, conn: Connection) {.base.} =
 
 method rollbackTransaction*(a: Adapter, conn: Connection) {.base.} =
   raise newException(DatabaseError, "rollbackTransaction not implemented")
+
+method poolMetrics*(a: Adapter): PoolMetrics {.base.} =
+  ## Връща метрики за connection pool-а. Базовата имплементация връща празни метрики.
+  PoolMetrics()

@@ -13,6 +13,9 @@ tests/test_schema_compile
 tests/t_integration
 tests/t_associations
 tests/t_schema_generator
+tests/t_new_types
+tests/t_phase2_types
+tests/t_postgres_types
 src/necto_migrate
 src/necto_rollback
 src/necto_status
@@ -20,6 +23,8 @@ src/necto_gen_migration
 src/necto_gen_schema
 src/necto/changeset
 src/necto/migration
+src/necto/postgres_types
+src/necto/type_system
 examples/friends/friends
 
 # Build artifacts

@@ -10,23 +10,56 @@
 
 import std/[strutils, options, json, times]
 
+# --- Custom types ---
+
+type
+  Uuid* = distinct string
+  Date* = object
+    year*: int
+    month*: int
+    day*: int
+  TimeOfDay* = object
+    hour*: int
+    minute*: int
+    second*: int
+  Decimal* = distinct string
+
+proc `==`*(a, b: Uuid): bool = string(a) == string(b)
+proc `$`*(u: Uuid): string = string(u)
+proc `$`*(d: Date): string =
+  d.year.intToStr(4) & "-" & d.month.intToStr(2) & "-" & d.day.intToStr(2)
+proc `$`*(t: TimeOfDay): string =
+  t.hour.intToStr(2) & ":" & t.minute.intToStr(2) & ":" & t.second.intToStr(2)
+proc `$`*(d: Decimal): string = string(d)
+proc `==`*(a, b: Decimal): bool = string(a) == string(b)
+
 # --- Built-in dbType mappings ---
 
 proc dbType*(T: typedesc[string]): string = "text"
 proc dbType*(T: typedesc[int]): string = "integer"
+proc dbType*(T: typedesc[int16]): string = "smallint"
 proc dbType*(T: typedesc[int64]): string = "bigint"
 proc dbType*(T: typedesc[float]): string = "double precision"
 proc dbType*(T: typedesc[bool]): string = "boolean"
 proc dbType*(T: typedesc[DateTime]): string = "timestamp with time zone"
+proc dbType*(T: typedesc[Date]): string = "date"
+proc dbType*(T: typedesc[TimeOfDay]): string = "time without time zone"
 proc dbType*(T: typedesc[JsonNode]): string = "jsonb"
+proc dbType*(T: typedesc[Uuid]): string = "uuid"
+proc dbType*(T: typedesc[Decimal]): string = "numeric"
+proc dbType*(T: typedesc[seq[byte]]): string = "bytea"
 
 proc dbType*[T](OptT: typedesc[Option[T]]): string = dbType(T)
+proc dbType*[T](SeqT: typedesc[seq[T]]): string = dbType(T) & "[]"
+
+proc dbType*[T: enum](EnumT: typedesc[T]): string = "text"
 
 # --- Cast from raw string input (e.g., HTTP params) ---
 
 proc castValue*(val: string, T: typedesc[string]): string = val
 proc castValue*(val: string, T: typedesc[int]): int = parseInt(val)
 proc castValue*(val: string, T: typedesc[int64]): int64 = parseBiggestInt(val)
+proc castValue*(val: string, T: typedesc[int16]): int16 = int16(parseInt(val))
 proc castValue*(val: string, T: typedesc[float]): float = parseFloat(val)
 proc castValue*(val: string, T: typedesc[bool]): bool = parseBool(val)
 
@@ -40,6 +73,99 @@ proc castValue*(val: string, T: typedesc[DateTime]): DateTime =
     except ValueError:
       result = parse(val, "yyyy-MM-dd")
 
+proc castValue*(val: string, T: typedesc[Date]): Date =
+  ## Parse ISO 8601 date от низ.
+  let dt = parse(val, "yyyy-MM-dd")
+  result = Date(year: dt.year, month: dt.month.int, day: dt.monthday.int)
+
+proc castValue*(val: string, T: typedesc[TimeOfDay]): TimeOfDay =
+  ## Parse ISO 8601 time от низ.
+  let dt = parse(val, "HH:mm:ss")
+  result = TimeOfDay(hour: dt.hour.int, minute: dt.minute.int, second: dt.second.int)
+
+proc castValue*(val: string, T: typedesc[Uuid]): Uuid =
+  Uuid(val)
+
+proc castValue*(val: string, T: typedesc[JsonNode]): JsonNode =
+  parseJson(val)
+
+proc castValue*(val: string, T: typedesc[Decimal]): Decimal =
+  Decimal(val)
+
+proc castValue*[T: enum](val: string, OptT: typedesc[T]): T =
+  ## Cast enum от низ — поддържа име или пореден номер.
+  try:
+    result = parseEnum[T](val)
+  except ValueError:
+    result = T(parseInt(val))
+
+# --- PostgreSQL array parser ---
+
+proc parsePgArray*(val: string): seq[string] =
+  ## Парсира PostgreSQL array текстов формат в елементи.
+  ## Поддържа quoting, escaping, NULL и вложени масиви.
+  ## Примери: {1,2,3}  {"a","b"}  {{1,2},{3,4}}
+  if val.len < 2 or val[0] != '{' or val[^1] != '}':
+    return @[val]
+  if val == "{}":
+    return @[]
+
+  result = @[]
+  var i = 1
+  while i < val.len - 1:
+    if val[i] == ',':
+      inc i
+      continue
+
+    var elem = ""
+    if val[i] == '"':
+      # quoted element
+      inc i
+      while i < val.len - 1:
+        if val[i] == '\\' and i + 1 < val.len:
+          inc i
+          elem.add(val[i])
+        elif val[i] == '"':
+          inc i
+          break
+        else:
+          elem.add(val[i])
+        inc i
+    else:
+      # unquoted element (could be nested array like {1,2} or plain text)
+      var depth = 0
+      while i < val.len - 1:
+        if val[i] == '{':
+          inc depth
+          elem.add(val[i])
+        elif val[i] == '}':
+          if depth > 0:
+            dec depth
+            elem.add(val[i])
+          else:
+            break
+        elif val[i] == ',' and depth == 0:
+          break
+        else:
+          elem.add(val[i])
+        inc i
+
+    result.add(elem.strip())
+
+    if i < val.len - 1 and val[i] == ',':
+      inc i
+
+proc castValue*[T](val: string, OptT: typedesc[seq[T]]): seq[T] =
+  ## Cast seq[T] от PostgreSQL array текстов формат.
+  if val.len == 0 or val == "{}":
+    return @[]
+  let elements = parsePgArray(val)
+  result = @[]
+  for elem in elements:
+    if elem == "NULL":
+      continue
+    result.add(castValue(elem, T))
+
 # --- Load from DB row string ---
 
 proc loadValue*(val: string, T: typedesc[string]): string =
@@ -48,6 +174,9 @@ proc loadValue*(val: string, T: typedesc[string]): string =
 
 proc loadValue*(val: string, T: typedesc[int]): int =
   if val.len == 0: 0 else: parseInt(val)
+
+proc loadValue*(val: string, T: typedesc[int16]): int16 =
+  if val.len == 0: 0'i16 else: int16(parseInt(val))
 
 proc loadValue*(val: string, T: typedesc[int64]): int64 =
   if val.len == 0: 0'i64 else: parseBiggestInt(val)
@@ -86,6 +215,92 @@ proc loadValue*(val: string, T: typedesc[DateTime]): DateTime =
     except:
       raise newException(ValueError, "Cannot load DateTime: " & val & " (normalized: " & clean & ")")
 
+proc loadValue*(val: string, T: typedesc[Date]): Date =
+  ## Load Date от PostgreSQL date string.
+  if val.len == 0:
+    result = Date(year: 1970, month: 1, day: 1)
+    return
+  try:
+    let dt = parse(val, "yyyy-MM-dd")
+    result = Date(year: dt.year, month: dt.month.int, day: dt.monthday.int)
+  except:
+    raise newException(ValueError, "Cannot load Date: " & val)
+
+proc loadValue*(val: string, T: typedesc[TimeOfDay]): TimeOfDay =
+  ## Load TimeOfDay от PostgreSQL time string.
+  if val.len == 0:
+    result = TimeOfDay(hour: 0, minute: 0, second: 0)
+    return
+  try:
+    let dt = parse(val, "HH:mm:ss")
+    result = TimeOfDay(hour: dt.hour.int, minute: dt.minute.int, second: dt.second.int)
+  except ValueError:
+    try:
+      let dt = parse(val, "HH:mm:ss'.'fff")
+      result = TimeOfDay(hour: dt.hour.int, minute: dt.minute.int, second: dt.second.int)
+    except:
+      raise newException(ValueError, "Cannot load TimeOfDay: " & val)
+
+proc loadValue*(val: string, T: typedesc[JsonNode]): JsonNode =
+  ## Load JsonNode от PostgreSQL json/jsonb string.
+  if val.len == 0:
+    result = newJNull()
+  else:
+    result = parseJson(val)
+
+proc loadValue*(val: string, T: typedesc[Uuid]): Uuid =
+  ## Load Uuid от PostgreSQL uuid string.
+  if val.len == 0:
+    result = Uuid("")
+  else:
+    result = Uuid(val)
+
+proc loadValue*(val: string, T: typedesc[Decimal]): Decimal =
+  ## Load Decimal от PostgreSQL numeric string.
+  if val.len == 0:
+    result = Decimal("0")
+  else:
+    result = Decimal(val)
+
+proc loadValue*[T: enum](val: string, OptT: typedesc[T]): T =
+  ## Load enum от PostgreSQL text/integer string.
+  if val.len == 0:
+    return T(0)
+  try:
+    result = parseEnum[T](val)
+  except ValueError:
+    try:
+      result = T(parseInt(val))
+    except ValueError:
+      raise newException(ValueError, "Cannot load enum '" & $T & "' from: " & val)
+
+proc loadValue*[T](val: string, OptT: typedesc[seq[T]]): seq[T] =
+  ## Load PostgreSQL array текстов формат.
+  if val.len == 0 or val == "{}":
+    return @[]
+  let elements = parsePgArray(val)
+  result = @[]
+  for elem in elements:
+    if elem == "NULL":
+      continue
+    result.add(loadValue(elem, T))
+
+proc loadValue*(val: string, T: typedesc[seq[byte]]): seq[byte] =
+  ## Load bytea от PostgreSQL hex escape формат \xDEADBEEF.
+  if val.len == 0:
+    return @[]
+  if val.len >= 2 and val[0] == '\\' and val[1] == 'x':
+    let hexStr = val[2..^1]
+    result = @[]
+    var i = 0
+    while i + 1 < hexStr.len:
+      let hexByte = hexStr[i..i+1]
+      result.add(byte(parseHexInt(hexByte)))
+      inc i, 2
+  else:
+    # escape format fallback
+    result = @[]
+
 proc loadValue*[T](val: string, OptT: typedesc[Option[T]]): Option[T] =
   ## Load Option[T] — ако val е празен, връща none.
   if val.len == 0:
@@ -93,14 +308,11 @@ proc loadValue*[T](val: string, OptT: typedesc[Option[T]]): Option[T] =
   else:
     some(loadValue(val, T))
 
-proc loadValue*[T](val: string, OptT: typedesc[seq[T]]): seq[T] =
-  ## Load PostgreSQL array. За сега placeholder.
-  @[]
-
 # --- Dump to DB string ---
 
 proc dumpValue*(val: string): string = val
 proc dumpValue*(val: int): string = $val
+proc dumpValue*(val: int16): string = $val
 proc dumpValue*(val: int64): string = $val
 proc dumpValue*(val: float): string = $val
 proc dumpValue*(val: bool): string = (if val: "true" else: "false")
@@ -109,15 +321,75 @@ proc dumpValue*(val: DateTime): string =
   ## Format DateTime за PostgreSQL.
   val.format("yyyy-MM-dd HH:mm:ss'.'fffzzz")
 
+proc dumpValue*(val: Date): string =
+  ## Format Date за PostgreSQL.
+  $val
+
+proc dumpValue*(val: TimeOfDay): string =
+  ## Format TimeOfDay за PostgreSQL.
+  $val
+
+proc dumpValue*(val: JsonNode): string =
+  ## Dump JsonNode към PostgreSQL json/jsonb string.
+  $val
+
+proc dumpValue*(val: Uuid): string =
+  ## Dump Uuid към PostgreSQL uuid string.
+  string(val)
+
+proc dumpValue*(val: Decimal): string =
+  ## Dump Decimal към PostgreSQL numeric string.
+  string(val)
+
+proc dumpValue*[T: enum](val: T): string =
+  ## Dump enum като текст (име).
+  $val
+
 proc dumpValue*[T](val: Option[T]): string =
   if val.isSome:
     dumpValue(val.get)
   else:
     ""
 
+proc needsPgArrayQuote(s: string): bool =
+  ## Проверява дали стойността трябва да се quote-не в PostgreSQL array.
+  if s.len == 0: return true
+  if s == "NULL": return true
+  for c in s:
+    if c in {',', '{', '}', '"', '\\', ' ', '\t', '\n', '\r'}:
+      return true
+  return false
+
+proc escapePgArrayElement(s: string): string =
+  ## Escape-ва стойност за PostgreSQL array.
+  var r = ""
+  for c in s:
+    if c == '\\' or c == '"':
+      r.add('\\')
+    r.add(c)
+  result = r
+
 proc dumpValue*[T](val: seq[T]): string =
-  ## Dump PostgreSQL array. За сега placeholder.
-  "{}"
+  ## Dump seq[T] към PostgreSQL array текстов формат.
+  if val.len == 0:
+    return "{}"
+  var parts: seq[string] = @[]
+  for item in val:
+    let s = dumpValue(item)
+    if needsPgArrayQuote(s):
+      parts.add('"' & escapePgArrayElement(s) & '"')
+    else:
+      parts.add(s)
+  result = "{" & parts.join(",") & "}"
+
+proc dumpValue*(val: seq[byte]): string =
+  ## Dump seq[byte] към PostgreSQL bytea hex формат.
+  if val.len == 0:
+    return "\\x"
+  var hexStr = "\\x"
+  for b in val:
+    hexStr.add(toHex(int(b), 2).toLowerAscii())
+  result = hexStr
 
 # --- Cast raw string to DB-safe string ---
 
@@ -130,6 +402,9 @@ proc castToDb*(val: string, nimTypeStr: string): string =
   of "int", "int32", "integer":
     discard parseInt(val)
     result = val
+  of "int16":
+    discard parseInt(val)
+    result = val
   of "int64", "bigint":
     discard parseBiggestInt(val)
     result = val
@@ -139,6 +414,27 @@ proc castToDb*(val: string, nimTypeStr: string): string =
   of "bool", "boolean":
     discard parseBool(val)
     result = val
+  of "Date":
+    discard castValue(val, Date)
+    result = val
+  of "TimeOfDay":
+    discard castValue(val, TimeOfDay)
+    result = val
+  of "JsonNode":
+    discard parseJson(val)
+    result = val
+  of "Uuid":
+    result = val
+  of "Decimal":
+    discard parseFloat(val)
+    result = val
+  of "seq[byte]":
+    if val.len == 0:
+      result = "\\x"
+    elif val.len >= 2 and val[0] == '\\' and val[1] == 'x':
+      result = val
+    else:
+      raise newException(ValueError, "Invalid bytea format: " & val)
   else:
     if nimTypeStr.startsWith("Option["):
       if val.len == 0 or val == "null" or val == "nil":
@@ -146,5 +442,13 @@ proc castToDb*(val: string, nimTypeStr: string): string =
       else:
         let inner = nimTypeStr[7..^2]
         result = castToDb(val, inner)
+    elif nimTypeStr.startsWith("seq["):
+      if val.len == 0 or val == "{}":
+        result = "{}"
+      else:
+        # basic validation — must look like an array
+        if val[0] != '{' or val[^1] != '}':
+          raise newException(ValueError, "Invalid array format: " & val)
+        result = val
     else:
       result = val

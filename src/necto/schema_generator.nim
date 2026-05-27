@@ -29,23 +29,38 @@ type
 # --- PostgreSQL → Nim type mapping ---
 
 proc pgTypeToNim*(pgType: string): string =
-  case pgType.toLowerAscii
+  let lower = pgType.toLowerAscii
+  case lower
   of "bigint": "int64"
   of "integer", "int", "serial", "bigserial": "int"
   of "smallint", "smallserial": "int16"
-  of "text", "character varying", "varchar", "char", "character", "name", "uuid": "string"
+  of "text", "character varying", "varchar", "char", "character", "name": "string"
+  of "uuid": "Uuid"
   of "boolean", "bool": "bool"
-  of "timestamp with time zone", "timestamp without time zone", "date", "time": "DateTime"
-  of "numeric", "decimal": "float64"
+  of "timestamp with time zone", "timestamp without time zone": "DateTime"
+  of "date": "Date"
+  of "time without time zone", "time with time zone", "time": "TimeOfDay"
+  of "numeric", "decimal": "Decimal"
   of "real": "float32"
   of "double precision": "float64"
   of "json", "jsonb": "JsonNode"
   of "bytea": "seq[byte]"
-  else: "string"
+  of "point": "PgPoint"
+  of "inet": "PgInet"
+  of "cidr": "PgCidr"
+  of "macaddr": "PgMacAddr"
+  of "tsvector": "PgTsVector"
+  of "tsquery": "PgTsQuery"
+  else:
+    if lower.endsWith("[]"):
+      let inner = lower[0..^3].strip()
+      "seq[" & pgTypeToNim(inner) & "]"
+    else:
+      "string"
 
 proc pgTypeToNimWithOption*(col: ColumnInfo): string =
   let base = pgTypeToNim(col.pgType)
-  if col.isNullable and base != "JsonNode":
+  if col.isNullable and base notin ["JsonNode", "seq[byte]"]:
     "Option[" & base & "]"
   else:
     base

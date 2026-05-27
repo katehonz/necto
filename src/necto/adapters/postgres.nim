@@ -4,7 +4,7 @@
 ## Предоставя connection pooling и правилно mapping на Row типове.
 ## Всички заявки използват pqexecParams за истински $N parameter binding.
 
-import std/[locks, deques, strutils]
+import std/[locks, deques, strutils, monotimes, times]
 import db_connector/db_postgres as pg
 import db_connector/postgres as libpq
 import ./base
@@ -22,6 +22,11 @@ type
     pool: Deque[pg.DbConn]
     maxConns: int
     activeConns: int
+    metricsTotalRequests: int64
+    metricsTotalWaitNs: int64
+    metricsMaxWaitNs: int64
+    metricsPeakActiveConns: int
+    metricsPoolExhaustedCount: int64
 
 # --- Конструктор и Connection Pool ---
 
@@ -52,26 +57,53 @@ proc newPostgresAdapter*(host, user, password, database: string;
     database: database,
     poolSize: poolSize,
     maxConns: poolSize,
-    activeConns: 0
+    activeConns: 0,
+    metricsTotalRequests: 0,
+    metricsTotalWaitNs: 0,
+    metricsMaxWaitNs: 0,
+    metricsPeakActiveConns: 0,
+    metricsPoolExhaustedCount: 0
   )
   initLock(result.poolLock)
   result.pool = initDeque[pg.DbConn]()
 
 proc checkout*(a: PostgresAdapter): pg.DbConn =
   ## Взема връзка от пула или създава нова.
+  let start = getMonoTime()
   withLock a.poolLock:
+    let waitNs = (getMonoTime() - start).inNanoseconds
+    inc a.metricsTotalRequests
+    a.metricsTotalWaitNs += waitNs
+    if waitNs > a.metricsMaxWaitNs:
+      a.metricsMaxWaitNs = waitNs
+
     if a.pool.len > 0:
       return a.pool.popFirst()
     if a.activeConns < a.maxConns:
       inc a.activeConns
+      if a.activeConns > a.metricsPeakActiveConns:
+        a.metricsPeakActiveConns = a.activeConns
       return a.newConnection()
     else:
+      inc a.metricsPoolExhaustedCount
       raise newException(DbError, "PostgreSQL connection pool exhausted (max: " & $a.maxConns & ")")
 
 proc checkin*(a: PostgresAdapter, conn: pg.DbConn) =
   ## Връща връзка обратно в пула.
   withLock a.poolLock:
     a.pool.addLast(conn)
+
+method poolMetrics*(a: PostgresAdapter): PoolMetrics =
+  ## Връща текущите метрики за pool-а.
+  withLock a.poolLock:
+    result = PoolMetrics(
+      totalRequests: a.metricsTotalRequests,
+      totalWaitMs: float64(a.metricsTotalWaitNs) / 1_000_000.0,
+      maxWaitMs: float64(a.metricsMaxWaitNs) / 1_000_000.0,
+      peakActiveConns: a.metricsPeakActiveConns,
+      poolExhaustedCount: a.metricsPoolExhaustedCount,
+      availableConns: a.pool.len
+    )
 
 # --- Low-level parameter binding helpers ---
 

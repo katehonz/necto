@@ -106,18 +106,45 @@ proc nimTypeToString(node: NimNode): string =
   else:
     result = $node
 
+proc stringToNimType(typeStr: string): NimNode =
+  ## Конвертира низ обратно в Nim type node.
+  if typeStr.startsWith("Option["):
+    let inner = stringToNimType(typeStr[7..^2])
+    result = nnkBracketExpr.newTree(newIdentNode("Option"), inner)
+  elif typeStr.startsWith("seq["):
+    let inner = stringToNimType(typeStr[4..^2])
+    result = nnkBracketExpr.newTree(newIdentNode("seq"), inner)
+  else:
+    result = newIdentNode(typeStr)
+
 proc dbTypeForNim(nimType: string): string =
   case nimType
   of "string": "text"
-  of "int": "integer"
+  of "int", "int32": "integer"
+  of "int16": "smallint"
   of "int64": "bigint"
   of "float", "float64": "double precision"
   of "bool": "boolean"
   of "DateTime": "timestamp with time zone"
+  of "Date": "date"
+  of "TimeOfDay": "time without time zone"
   of "JsonNode": "jsonb"
+  of "Uuid": "uuid"
+  of "Decimal": "numeric"
+  of "seq[byte]": "bytea"
+  of "PgPoint": "point"
+  of "PgInet": "inet"
+  of "PgCidr": "cidr"
+  of "PgMacAddr": "macaddr"
+  of "PgTsVector": "tsvector"
+  of "PgTsQuery": "tsquery"
+  of "Money": "bigint"
   else:
     if nimType.startsWith("Option["):
       dbTypeForNim(nimType[7..^2])
+    elif nimType.startsWith("seq["):
+      let inner = nimType[4..^2]
+      dbTypeForNim(inner) & "[]"
     else:
       "text"  # fallback
 
@@ -583,6 +610,43 @@ macro necto_schema*(name: untyped, body: untyped): untyped =
   )
   result.add(getFieldRuntimeProc)
 
+  # --- Генериране на setFieldValRuntime proc ---
+  var setFieldRuntimeCaseBranches: seq[NimNode] = @[]
+  for fm in fieldMetaNodes:
+    let fieldNameNode = fm[1][1]
+    let fieldNameStr = $fieldNameNode
+    let nimTypeNode = fm[3][1]
+    let nimTypeStr = $nimTypeNode
+    let fieldId = newIdentNode(fieldNameStr)
+    let typeNode = stringToNimType(nimTypeStr)
+    let assignBody = nnkAsgn.newTree(
+      nnkDotExpr.newTree(newIdentNode("obj"), fieldId),
+      newCall(newIdentNode("loadValue"), newIdentNode("value"), typeNode)
+    )
+    let ofBranch = newTree(nnkOfBranch, fieldNameNode, assignBody)
+    setFieldRuntimeCaseBranches.add(ofBranch)
+  setFieldRuntimeCaseBranches.add(newTree(nnkElse, newEmptyNode()))
+
+  var setFieldRuntimeCaseStmt = newTree(nnkCaseStmt, newIdentNode("fieldName"))
+  for b in setFieldRuntimeCaseBranches:
+    setFieldRuntimeCaseStmt.add(b)
+
+  var setFieldRuntimeProc = newTree(nnkProcDef,
+    newTree(nnkPostfix, newIdentNode("*"), newIdentNode("setFieldValRuntime")),
+    newEmptyNode(),
+    newEmptyNode(),
+    newTree(nnkFormalParams,
+      newEmptyNode(),
+      newTree(nnkIdentDefs, newIdentNode("obj"), newTree(nnkVarTy, typeName), newEmptyNode()),
+      newTree(nnkIdentDefs, newIdentNode("fieldName"), newIdentNode("string"), newEmptyNode()),
+      newTree(nnkIdentDefs, newIdentNode("value"), newIdentNode("string"), newEmptyNode())
+    ),
+    newEmptyNode(),
+    newEmptyNode(),
+    setFieldRuntimeCaseStmt
+  )
+  result.add(setFieldRuntimeProc)
+
   # --- Генериране на preloadAssoc template ---
   var preloadWhenBranches: seq[NimNode] = @[]
   var accessorTemplates: seq[NimNode] = @[]
@@ -685,6 +749,38 @@ macro necto_schema*(name: untyped, body: untyped): untyped =
       preloadWhenStmt
     )
     result.add(preloadTemplate)
+
+    # --- Генериране на autoPreloadAssocs template ---
+    var autoPreloadStmts = newStmtList()
+    for am in assocMetaNodes:
+      let assocNameLit = am[1][1]
+      let ifBranch = newTree(nnkIfStmt,
+        newTree(nnkElifBranch,
+          nnkInfix.newTree(newIdentNode("in"), assocNameLit, newIdentNode("names")),
+          newStmtList(
+            newTree(nnkDiscardStmt,
+              newCall(newIdentNode("preloadAssoc"), assocNameLit, newIdentNode("repo"), newIdentNode("records"))
+            )
+          )
+        )
+      )
+      autoPreloadStmts.add(ifBranch)
+
+    var autoPreloadTemplate = newTree(nnkTemplateDef,
+      newTree(nnkPostfix, newIdentNode("*"), newIdentNode("autoPreloadAssocs")),
+      newEmptyNode(),
+      newEmptyNode(),
+      newTree(nnkFormalParams,
+        newIdentNode("untyped"),
+        newTree(nnkIdentDefs, newIdentNode("repo"), newIdentNode("Repo"), newEmptyNode()),
+        newTree(nnkIdentDefs, newIdentNode("records"), newTree(nnkVarTy, newTree(nnkBracketExpr, newIdentNode("seq"), typeName)), newEmptyNode()),
+        newTree(nnkIdentDefs, newIdentNode("names"), newTree(nnkBracketExpr, newIdentNode("seq"), newIdentNode("string")), newEmptyNode())
+      ),
+      newEmptyNode(),
+      newEmptyNode(),
+      autoPreloadStmts
+    )
+    result.add(autoPreloadTemplate)
 
   for at in accessorTemplates:
     result.add(at)
