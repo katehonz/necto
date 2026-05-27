@@ -14,7 +14,7 @@
 ##   AppRepo.all(Query.fromSchema(User).where("age", Gt, "18"))
 ##   AppRepo.insert(userChangeset)
 
-import std/[macros, options, strutils, tables, algorithm]
+import std/[macros, options, strutils, tables, algorithm, times]
 import ./adapters/base
 import ./query
 import ./schema
@@ -162,6 +162,105 @@ template count*[T](repo: Repo, q: Query[T]): int64 =
         0'i64
     finally:
       repo.releaseConn(conn, a)
+
+# --- Streaming (cursor-based) ---
+
+type
+  StreamIterator*[T] = object
+    ## Cursor-based iterator за големи резултати.
+    ## Задържа една връзка и една транзакция за целия stream.
+    conn: Connection
+    adapter: Adapter
+    cursorName: string
+    batchSize: int
+    bq: BoundQuery
+    buffer: seq[T]
+    bufferIdx: int
+    finished: bool
+
+proc next*[T](it: var StreamIterator[T]): Option[T] =
+  ## Връща следващия запис от stream-а или none ако stream-ът е изчерпан.
+  mixin load
+  if it.finished:
+    return none(T)
+
+  # Fetch next batch ако buffer-ът е празен
+  if it.bufferIdx >= it.buffer.len:
+    it.bufferIdx = 0
+    it.buffer = @[]
+    let rows = it.adapter.fetchCursor(it.conn, it.cursorName, it.batchSize)
+    if rows.len == 0:
+      it.finished = true
+      return none(T)
+    for row in rows:
+      it.buffer.add(load(row, T))
+
+  if it.bufferIdx < it.buffer.len:
+    result = some(it.buffer[it.bufferIdx])
+    inc it.bufferIdx
+  else:
+    it.finished = true
+    result = none(T)
+
+
+
+template stream*[T](repo: Repo, q: Query[T], batchSz: int = 100): StreamIterator[T] =
+  ## Създава cursor-based stream за Query.
+  ## Stream-ът задържа една връзка и една транзакция.
+  ## Задължително извикайте `close()` или използвайте `forStream` template.
+  mixin schemaMeta, load
+  block:
+    let meta = schemaMeta(T)
+    let a = if repo.readAdapter != nil: repo.readAdapter else: repo.adapter
+    let conn = repo.getReadConn()
+    let bs = batchSz
+    var iter: StreamIterator[T]
+    iter.conn = conn
+    iter.adapter = a
+    iter.batchSize = bs
+    iter.bufferIdx = 0
+    iter.finished = false
+    iter.bq = q.toBoundQuery()
+    let uniqueId = epochTime().int64
+    iter.cursorName = "necto_cursor_" & meta.tableName & "_" & $uniqueId
+
+    try:
+      a.beginTransaction(conn)
+      let cursorSql = "DECLARE \"" & iter.cursorName & "\" CURSOR FOR " & iter.bq.sql
+      a.exec(conn, cursorSql, iter.bq.args)
+    except:
+      repo.releaseConn(conn, a)
+      raise
+
+    iter
+
+proc close*[T](it: var StreamIterator[T]) =
+  ## Затваря курсора и освобождава връзката.
+  if it.conn == nil:
+    return
+  try:
+    it.adapter.exec(it.conn, "CLOSE \"" & it.cursorName & "\"")
+    it.adapter.commitTransaction(it.conn)
+  except:
+    discard
+  it.adapter.disconnect(it.conn)
+  it.conn = nil
+
+template forStream*[T](repo: Repo, q: Query[T], varName: untyped, body: untyped) =
+  ## Iterate over a Query result stream. Closes automatically.
+  ## Пример:
+  ##   forStream(repo, fromSchema(User).where("age", Gte, "18"), user):
+  ##     echo user.name
+  block:
+    var iter = repo.stream(q)
+    try:
+      while true:
+        let varNameOpt = iter.next()
+        if varNameOpt.isNone: break
+        let varName = varNameOpt.get
+        body
+    finally:
+      iter.close()
 
 # --- Auto-preload macros ---
 

@@ -296,6 +296,13 @@ method insertReturning*(a: PostgresAdapter, conn: Connection,
   else:
     raise newException(DatabaseError, "insertReturning: no rows returned")
 
+method fetchCursor*(a: PostgresAdapter, conn: Connection, cursorName: string,
+                    count: int): seq[DbRow] =
+  ## Fetch-ва до `count` реда от PostgreSQL курсор.
+  let pgConn = PgConnection(conn)
+  let sql = "FETCH FORWARD " & $count & " FROM \"" & cursorName & "\""
+  pgSelect(a, pgConn, sql, @[])
+
 method beginTransaction*(a: PostgresAdapter, conn: Connection) =
   a.exec(conn, "BEGIN", @[])
 

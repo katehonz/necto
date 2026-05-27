@@ -69,6 +69,11 @@ method insertReturning*(a: Adapter, conn: Connection,
   ## Изпълнява INSERT ... RETURNING pkName и връща генерирания ID.
   raise newException(DatabaseError, "insertReturning not implemented")
 
+method fetchCursor*(a: Adapter, conn: Connection, cursorName: string,
+                    count: int): seq[DbRow] {.base.} =
+  ## Fetch-ва до `count` реда от курсор. Връща празен seq ако курсорът е изчерпан.
+  raise newException(DatabaseError, "fetchCursor not implemented")
+
 method beginTransaction*(a: Adapter, conn: Connection) {.base.} =
   raise newException(DatabaseError, "beginTransaction not implemented")
 

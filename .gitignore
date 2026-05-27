@@ -63,3 +63,4 @@ tests/t_zero_copy_arrays
 test_jsonb_macro
 tests/t_soft_deletes
 tests/t_migration_lock
+tests/t_streaming
