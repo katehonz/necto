@@ -53,3 +53,9 @@ src/necto_verify
 src/necto/query.out
 src/necto/migrator.out
 benchmarks/necto_bench
+test_compile
+tests/t_embedded
+tests/t_jsonb_query
+tests/t_many_to_many
+tests/t_migration_change
+tests/t_multi

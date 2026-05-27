@@ -77,6 +77,64 @@ type
     minute*: int
     second*: int
   Decimal* = distinct string
+  FixedDecimal*[Scale: static int] = object
+    ## Fixed-point decimal с int64 backing store.
+    ## Scale е броят знаци след десетичната запетая.
+    ## Пример: FixedDecimal[2] с raw=12345 = 123.45
+    raw*: int64
+
+proc tenPow(n: static int): int64 {.compileTime.} =
+  result = 1'i64
+  for i in 1..n:
+    result *= 10'i64
+
+proc `==`*[S: static int](a, b: FixedDecimal[S]): bool = a.raw == b.raw
+proc `<`*[S: static int](a, b: FixedDecimal[S]): bool = a.raw < b.raw
+proc `<=`*[S: static int](a, b: FixedDecimal[S]): bool = a.raw <= b.raw
+proc `>`*[S: static int](a, b: FixedDecimal[S]): bool = a.raw > b.raw
+proc `>=`*[S: static int](a, b: FixedDecimal[S]): bool = a.raw >= b.raw
+
+proc `$`*[S: static int](d: FixedDecimal[S]): string =
+  const pow10 = tenPow(S)
+  let sign = if d.raw < 0: "-" else: ""
+  let absRaw = abs(d.raw)
+  let intPart = absRaw div pow10
+  let fracPart = absRaw mod pow10
+  let fracStr = intToStr(fracPart.int, S)
+  sign & $intPart & "." & fracStr
+
+proc fromFloat*[S: static int](val: float): FixedDecimal[S] =
+  ## Създава FixedDecimal от float.
+  const pow10 = tenPow(S)
+  FixedDecimal[S](raw: int64(val * float(pow10)))
+
+proc fromString*[S: static int](val: string): FixedDecimal[S] =
+  ## Създава FixedDecimal от string.
+  let f = parseFloat(val)
+  fromFloat[S](f)
+
+proc `+`*[S: static int](a, b: FixedDecimal[S]): FixedDecimal[S] =
+  FixedDecimal[S](raw: a.raw + b.raw)
+
+proc `-`*[S: static int](a, b: FixedDecimal[S]): FixedDecimal[S] =
+  FixedDecimal[S](raw: a.raw - b.raw)
+
+proc `*`*[S: static int](a, b: FixedDecimal[S]): FixedDecimal[S] =
+  ## Умножение с корекция на scale.
+  const pow10 = tenPow(S)
+  FixedDecimal[S](raw: (a.raw * b.raw) div pow10)
+
+proc `/`*[S: static int](a, b: FixedDecimal[S]): FixedDecimal[S] =
+  ## Делене с корекция на scale.
+  const pow10 = tenPow(S)
+  FixedDecimal[S](raw: (a.raw * pow10) div b.raw)
+
+proc dbType*[S: static int](T: typedesc[FixedDecimal[S]]): string = "numeric"
+proc loadValue*[S: static int](val: string, T: typedesc[FixedDecimal[S]]): FixedDecimal[S] =
+  fromString[S](val)
+proc dumpValue*[S: static int](val: FixedDecimal[S]): string = $val
+proc castValue*[S: static int](val: string, T: typedesc[FixedDecimal[S]]): FixedDecimal[S] =
+  fromString[S](val)
 
 proc `==`*(a, b: Uuid): bool = string(a) == string(b)
 proc `$`*(u: Uuid): string = string(u)

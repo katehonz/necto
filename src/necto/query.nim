@@ -27,6 +27,7 @@ type
     value*: string
     conjunction*: string  # "AND" | "OR"
     fragmentArgs*: seq[string]  # args from SqlFragment
+    isRawField*: bool  ## Ако true, `field` се използва директно без кавички (SQL израз).
 
   OrderClause* = object
     field*: string
@@ -62,6 +63,7 @@ type
     op*: WhereOp
     value*: string
     conjunction*: string  ## "AND" | "OR"
+    isRawField*: bool  ## Ако true, `field` се използва директно без кавички.
 
   Query*[T] = object
     ## Структура, която натрупва SQL фрагменти.
@@ -198,6 +200,8 @@ proc fragment*(sql: string, args: varargs[string]): SqlFragment =
 
 proc whereDynamic*[T](q: Query[T], frag: SqlFragment): Query[T] =
   ## Добавя raw SQL фрагмент като WHERE условие.
+  ## Placeholders `$1`, `$2` … във фрагмента се преномерират автоматично
+  ## при генериране на SQL (`toBoundQuery`).
   result = q
   result.whereClauses.add(WhereClause(
     field: frag.sql,
@@ -210,6 +214,69 @@ proc whereDynamic*[T](q: Query[T], frag: SqlFragment): Query[T] =
 proc whereFragment*[T](q: Query[T], frag: SqlFragment): Query[T] =
   ## Добавя raw SQL фрагмент като WHERE условие.
   whereDynamic(q, frag)
+
+# --- JSONB helpers ---
+
+template jsonbContains*(field: string, json: string): SqlFragment =
+  ## PostgreSQL `@>` оператор: jsonb съдържа даден обект.
+  ## Пример: `whereDynamic(q, jsonbContains("profile", "{\"verified\":true}"))`
+  fragment("\"" & field & "\" @> $1", json)
+
+template jsonbHasKey*(field: string, key: string): SqlFragment =
+  ## PostgreSQL `?` оператор: jsonb има даден ключ.
+  fragment("\"" & field & "\" ? $1", key)
+
+template jsonbHasAnyKeys*(field: string, keys: openArray[string]): SqlFragment =
+  ## PostgreSQL `?|` оператор: jsonb има поне един от ключовете.
+  fragment("\"" & field & "\" ?| $1", "{" & keys.join(",") & "}")
+
+template jsonbHasAllKeys*(field: string, keys: openArray[string]): SqlFragment =
+  ## PostgreSQL `?&` оператор: jsonb има всички ключове.
+  fragment("\"" & field & "\" ?& $1", "{" & keys.join(",") & "}")
+
+proc jsonbPathText*(field: string, path: openArray[string]): string =
+  ## Връща SQL израз `field #>> '{path}'` за text extraction.
+  ## Може да се използва с `whereRawField`.
+  result = "\"" & field & "\" #>> '{" & path.join(",") & "}'"
+
+proc jsonbPath*(field: string, path: openArray[string]): string =
+  ## Връща SQL израз `field #> '{path}'` за JSON extraction.
+  result = "\"" & field & "\" #> '{" & path.join(",") & "}'"
+
+proc whereRawField*[T](q: Query[T], fieldExpr: string, op: WhereOp, value: string;
+                       conjunction: string = "AND"): Query[T] =
+  ## WHERE условие с raw SQL израз за поле (без автоматични кавички).
+  ## Полезно за JSONB path оператори и др.
+  ## Пример: `q.whereRawField(jsonbPathText("profile", ["settings","theme"]), Eq, "dark")`
+  result = q
+  result.whereClauses.add(WhereClause(
+    field: fieldExpr, op: op, value: value, conjunction: conjunction, isRawField: true
+  ))
+
+proc orWhereRawField*[T](q: Query[T], fieldExpr: string, op: WhereOp, value: string): Query[T] =
+  ## OR WHERE условие с raw SQL израз за поле.
+  result = q
+  result.whereClauses.add(WhereClause(
+    field: fieldExpr, op: op, value: value, conjunction: "OR", isRawField: true
+  ))
+
+# --- Convenience JSONB where methods ---
+
+proc whereJsonbContains*[T](q: Query[T], field: string, json: string): Query[T] =
+  ## WHERE field @> json
+  whereDynamic(q, jsonbContains(field, json))
+
+proc whereJsonbHasKey*[T](q: Query[T], field: string, key: string): Query[T] =
+  ## WHERE field ? key
+  whereDynamic(q, jsonbHasKey(field, key))
+
+proc whereJsonbHasAnyKeys*[T](q: Query[T], field: string, keys: openArray[string]): Query[T] =
+  ## WHERE field ?| keys
+  whereDynamic(q, jsonbHasAnyKeys(field, keys))
+
+proc whereJsonbHasAllKeys*[T](q: Query[T], field: string, keys: openArray[string]): Query[T] =
+  ## WHERE field ?& keys
+  whereDynamic(q, jsonbHasAllKeys(field, keys))
 
 # --- Subquery ---
 
@@ -270,52 +337,69 @@ template toBoundQuery*[T](q: Query[T]): BoundQuery =
         wheres.add(w.conjunction)
       isFirst = false
 
-      if w.field.contains("$1") or w.field.contains("?") or w.field.contains("("):
-        wheres.add(w.field)
-        for arg in w.fragmentArgs:
-          args.add(arg)
-      else:
+      proc quoteField(f: string): string =
+        if f.contains(".") or f.contains("(") or f.contains("#") or f.contains("@") or f.contains("?"):
+          f
+        else:
+          "\"" & f & "\""
+
+      if w.isRawField:
         case w.op
         of Eq:
-          wheres.add("\"" & w.field & "\" = $" & $idx)
-          args.add(w.value)
-          inc idx
+          wheres.add(w.field & " = $" & $idx); args.add(w.value); inc idx
         of Ne:
-          wheres.add("\"" & w.field & "\" != $" & $idx)
-          args.add(w.value)
-          inc idx
+          wheres.add(w.field & " != $" & $idx); args.add(w.value); inc idx
         of Gt:
-          wheres.add("\"" & w.field & "\" > $" & $idx)
-          args.add(w.value)
-          inc idx
+          wheres.add(w.field & " > $" & $idx); args.add(w.value); inc idx
         of Gte:
-          wheres.add("\"" & w.field & "\" >= $" & $idx)
-          args.add(w.value)
-          inc idx
+          wheres.add(w.field & " >= $" & $idx); args.add(w.value); inc idx
         of Lt:
-          wheres.add("\"" & w.field & "\" < $" & $idx)
-          args.add(w.value)
-          inc idx
+          wheres.add(w.field & " < $" & $idx); args.add(w.value); inc idx
         of Lte:
-          wheres.add("\"" & w.field & "\" <= $" & $idx)
-          args.add(w.value)
-          inc idx
+          wheres.add(w.field & " <= $" & $idx); args.add(w.value); inc idx
         of Like:
-          wheres.add("\"" & w.field & "\" LIKE $" & $idx)
-          args.add(w.value)
-          inc idx
+          wheres.add(w.field & " LIKE $" & $idx); args.add(w.value); inc idx
         of Ilike:
-          wheres.add("\"" & w.field & "\" ILIKE $" & $idx)
-          args.add(w.value)
-          inc idx
+          wheres.add(w.field & " ILIKE $" & $idx); args.add(w.value); inc idx
         of In:
-          wheres.add("\"" & w.field & "\" IN ($" & $idx & ")")
-          args.add(w.value)
-          inc idx
+          wheres.add(w.field & " IN ($" & $idx & ")"); args.add(w.value); inc idx
         of IsNull:
-          wheres.add("\"" & w.field & "\" IS NULL")
+          wheres.add(w.field & " IS NULL")
         of NotNull:
-          wheres.add("\"" & w.field & "\" IS NOT NULL")
+          wheres.add(w.field & " IS NOT NULL")
+      elif w.fragmentArgs.len > 0:
+        # Фрагмент с placeholders — преномерираме $1, $2 …
+        var fragSql = w.field
+        for i in 1..w.fragmentArgs.len:
+          fragSql = fragSql.replace("$" & $i, "$" & $idx)
+          args.add(w.fragmentArgs[i-1])
+          inc idx
+        wheres.add(fragSql)
+      else:
+        let qf = quoteField(w.field)
+        case w.op
+        of Eq:
+          wheres.add(qf & " = $" & $idx); args.add(w.value); inc idx
+        of Ne:
+          wheres.add(qf & " != $" & $idx); args.add(w.value); inc idx
+        of Gt:
+          wheres.add(qf & " > $" & $idx); args.add(w.value); inc idx
+        of Gte:
+          wheres.add(qf & " >= $" & $idx); args.add(w.value); inc idx
+        of Lt:
+          wheres.add(qf & " < $" & $idx); args.add(w.value); inc idx
+        of Lte:
+          wheres.add(qf & " <= $" & $idx); args.add(w.value); inc idx
+        of Like:
+          wheres.add(qf & " LIKE $" & $idx); args.add(w.value); inc idx
+        of Ilike:
+          wheres.add(qf & " ILIKE $" & $idx); args.add(w.value); inc idx
+        of In:
+          wheres.add(qf & " IN ($" & $idx & ")"); args.add(w.value); inc idx
+        of IsNull:
+          wheres.add(qf & " IS NULL")
+        of NotNull:
+          wheres.add(qf & " IS NOT NULL")
     parts.add(wheres.join(" "))
 
   if q.orderClauses.len > 0:
@@ -336,47 +420,30 @@ template toBoundQuery*[T](q: Query[T]): BoundQuery =
     parts.add("HAVING")
     var havings: seq[string] = @[]
     for h in q.havingClauses:
+      let qf = if h.isRawField: h.field else: "\"" & h.field & "\""
       case h.op
       of Eq:
-        havings.add("\"" & h.field & "\" = $" & $idx)
-        args.add(h.value)
-        inc idx
+        havings.add(qf & " = $" & $idx); args.add(h.value); inc idx
       of Ne:
-        havings.add("\"" & h.field & "\" != $" & $idx)
-        args.add(h.value)
-        inc idx
+        havings.add(qf & " != $" & $idx); args.add(h.value); inc idx
       of Gt:
-        havings.add("\"" & h.field & "\" > $" & $idx)
-        args.add(h.value)
-        inc idx
+        havings.add(qf & " > $" & $idx); args.add(h.value); inc idx
       of Gte:
-        havings.add("\"" & h.field & "\" >= $" & $idx)
-        args.add(h.value)
-        inc idx
+        havings.add(qf & " >= $" & $idx); args.add(h.value); inc idx
       of Lt:
-        havings.add("\"" & h.field & "\" < $" & $idx)
-        args.add(h.value)
-        inc idx
+        havings.add(qf & " < $" & $idx); args.add(h.value); inc idx
       of Lte:
-        havings.add("\"" & h.field & "\" <= $" & $idx)
-        args.add(h.value)
-        inc idx
+        havings.add(qf & " <= $" & $idx); args.add(h.value); inc idx
       of Like:
-        havings.add("\"" & h.field & "\" LIKE $" & $idx)
-        args.add(h.value)
-        inc idx
+        havings.add(qf & " LIKE $" & $idx); args.add(h.value); inc idx
       of Ilike:
-        havings.add("\"" & h.field & "\" ILIKE $" & $idx)
-        args.add(h.value)
-        inc idx
+        havings.add(qf & " ILIKE $" & $idx); args.add(h.value); inc idx
       of In:
-        havings.add("\"" & h.field & "\" IN ($" & $idx & ")")
-        args.add(h.value)
-        inc idx
+        havings.add(qf & " IN ($" & $idx & ")"); args.add(h.value); inc idx
       of IsNull:
-        havings.add("\"" & h.field & "\" IS NULL")
+        havings.add(qf & " IS NULL")
       of NotNull:
-        havings.add("\"" & h.field & "\" IS NOT NULL")
+        havings.add(qf & " IS NOT NULL")
     var havingParts: seq[string] = @[]
     for i, h in havings:
       if i > 0:
