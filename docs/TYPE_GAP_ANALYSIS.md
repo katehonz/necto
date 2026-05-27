@@ -105,7 +105,7 @@ PostgreSQL JSONB оператори интегрирани в Query builder:
 - **Prepared statement cache** — per-connection кеширане
 - **FTS DSL** — type-safe full-text search
 - **Subqueries / CTEs** — `WITH` clauses и correlated subqueries
-- **Window functions** — `OVER (PARTITION BY ...)`
+- ✅ **Window functions** — `ROW_NUMBER()`, `RANK()`, `DENSE_RANK()`, `LAG()`, `LEAD()` с `OVER (PARTITION BY ... ORDER BY ...)`
 
 ### Фаза 4: Ecosystem
 - **Benchmarks** — сравнителни тестове с Ecto и ActiveRecord
@@ -127,6 +127,7 @@ PostgreSQL JSONB оператори интегрирани в Query builder:
 | **Compile-time JSON paths** | ✅ | ❌ | `whereJsonbIt` macro за type-safe JSONB path queries |
 | **Soft deletes** | ✅ | ⚠️ | `soft_deletes` pragma + `includeDeleted()`/`onlyDeleted()` |
 | **Streaming** | ✅ | ❌ | Cursor-based `repo.stream` + `forStream` template |
+| **Window functions** | ✅ | ❌ | `ROW_NUMBER()`, `RANK()`, `DENSE_RANK()`, `LAG()`, `LEAD()` |
 | **Migration locking** | ✅ | ❌ | PostgreSQL advisory locks за конкурентни миграции |
 | **Compile-time schema verification** | ✅ | ❌ | `-d:nectoVerify` проверява таблици/колони при компилация |
 | **Compile-time query verification** | ✅ | ❌ | EXPLAIN-based validation при стартиране |

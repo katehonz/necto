@@ -79,6 +79,7 @@ type
     groupByFields*: seq[string]
     havingClauses*: seq[HavingClause]
     includeDeletedVal*: bool  ## За soft deletes: включва изтрити редове
+    windowFunctions*: seq[string]  ## Window function SQL изрази
 
   BoundQuery* = object
     ## SQL с $N placeholders + отделени аргументи.
@@ -191,6 +192,63 @@ proc max*[T](q: Query[T], field: string, alias: string = ""): Query[T] =
   result = q
   let finalAlias = if alias.len > 0: alias else: field & "_max"
   result.aggregates.add(AggregateClause(op: AggMax, field: field, alias: finalAlias))
+
+# --- Window functions ---
+
+proc buildOverClause(partitionBy: openArray[string], orderByField: string, orderDir: OrderDirection): string =
+  ## Генерира OVER() SQL клауза.
+  var parts: seq[string] = @[]
+  if partitionBy.len > 0:
+    parts.add("PARTITION BY " & partitionBy.mapIt("\"" & it & "\"").join(", "))
+  if orderByField.len > 0:
+    let dirStr = if orderDir == Asc: "ASC" else: "DESC"
+    parts.add("ORDER BY \"" & orderByField & "\" " & dirStr)
+  result = "OVER (" & parts.join(" ") & ")"
+
+proc rowNumber*[T](q: Query[T], partitionBy: openArray[string] = [],
+                   orderByField: string = "", orderDir: OrderDirection = Asc,
+                   alias: string = "row_num"): Query[T] =
+  ## Добавя ROW_NUMBER() window function.
+  ## Пример: q.rowNumber(partitionBy = ["dept"], orderByField = "salary", orderDir = Desc)
+  result = q
+  let over = buildOverClause(partitionBy, orderByField, orderDir)
+  result.windowFunctions.add("ROW_NUMBER() " & over & " AS \"" & alias & "\"")
+
+proc rank*[T](q: Query[T], partitionBy: openArray[string] = [],
+              orderByField: string = "", orderDir: OrderDirection = Asc,
+              alias: string = "rank"): Query[T] =
+  ## Добавя RANK() window function.
+  result = q
+  let over = buildOverClause(partitionBy, orderByField, orderDir)
+  result.windowFunctions.add("RANK() " & over & " AS \"" & alias & "\"")
+
+proc denseRank*[T](q: Query[T], partitionBy: openArray[string] = [],
+                   orderByField: string = "", orderDir: OrderDirection = Asc,
+                   alias: string = "dense_rank"): Query[T] =
+  ## Добавя DENSE_RANK() window function.
+  result = q
+  let over = buildOverClause(partitionBy, orderByField, orderDir)
+  result.windowFunctions.add("DENSE_RANK() " & over & " AS \"" & alias & "\"")
+
+proc lag*[T](q: Query[T], field: string, offset: int = 1,
+             partitionBy: openArray[string] = [],
+             orderByField: string = "", orderDir: OrderDirection = Asc,
+             alias: string = ""): Query[T] =
+  ## Добавя LAG(field, offset) window function.
+  result = q
+  let over = buildOverClause(partitionBy, orderByField, orderDir)
+  let defaultAlias = if alias.len > 0: alias else: field & "_lag"
+  result.windowFunctions.add("LAG(\"" & field & "\", " & $offset & ") " & over & " AS \"" & defaultAlias & "\"")
+
+proc lead*[T](q: Query[T], field: string, offset: int = 1,
+              partitionBy: openArray[string] = [],
+              orderByField: string = "", orderDir: OrderDirection = Asc,
+              alias: string = ""): Query[T] =
+  ## Добавя LEAD(field, offset) window function.
+  result = q
+  let over = buildOverClause(partitionBy, orderByField, orderDir)
+  let defaultAlias = if alias.len > 0: alias else: field & "_lead"
+  result.windowFunctions.add("LEAD(\"" & field & "\", " & $offset & ") " & over & " AS \"" & defaultAlias & "\"")
 
 # --- Group By / Having ---
 
@@ -330,7 +388,12 @@ template toBoundQuery*[T](q: Query[T]): BoundQuery =
         aggParts.add("MAX(\"" & agg.field & "\") AS \"" & agg.alias & "\"")
     parts.add(aggParts.join(", "))
   elif q.selectFields.len > 0:
-    parts.add(q.selectFields.join(", "))
+    var selectParts = q.selectFields
+    for wf in q.windowFunctions:
+      selectParts.add(wf)
+    parts.add(selectParts.join(", "))
+  elif q.windowFunctions.len > 0:
+    parts.add(q.windowFunctions.join(", "))
   else:
     parts.add("*")
 
