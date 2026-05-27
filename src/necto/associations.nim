@@ -93,9 +93,10 @@ template preloadBelongsTo*[Parent, Child](repo: Repo, parents: seq[Parent]): Tab
       let sql = "SELECT * FROM \"" & childMeta.tableName &
                 "\" WHERE \"" & assoc.ownerKey & "\" IN (" & placeholders.join(", ") & ")"
 
-      let conn = repo.getConn()
-      let rows = repo.adapter.query(conn, sql, fkValues)
-      repo.releaseConn(conn)
+      let conn = repo.getReadConn()
+      let a = if repo.readAdapter != nil: repo.readAdapter else: repo.adapter
+      let rows = a.query(conn, sql, fkValues)
+      repo.releaseConn(conn, a)
 
       for row in rows:
         let child = load(row, Child)
@@ -153,9 +154,10 @@ template preloadHasMany*[Parent, Child](repo: Repo, parents: seq[Parent]): Table
       let sql = "SELECT * FROM \"" & childMeta.tableName &
                 "\" WHERE \"" & fkField & "\" IN (" & placeholders.join(", ") & ")"
 
-      let conn = repo.getConn()
-      let rows = repo.adapter.query(conn, sql, pkValues)
-      repo.releaseConn(conn)
+      let conn = repo.getReadConn()
+      let a = if repo.readAdapter != nil: repo.readAdapter else: repo.adapter
+      let rows = a.query(conn, sql, pkValues)
+      repo.releaseConn(conn, a)
 
       for row in rows:
         let child = load(row, Child)
@@ -215,9 +217,10 @@ template preloadHasOne*[Parent, Child](repo: Repo, parents: seq[Parent]): Table[
       let sql = "SELECT * FROM \"" & childMeta.tableName &
                 "\" WHERE \"" & fkField & "\" IN (" & placeholders.join(", ") & ")"
 
-      let conn = repo.getConn()
-      let rows = repo.adapter.query(conn, sql, pkValues)
-      repo.releaseConn(conn)
+      let conn = repo.getReadConn()
+      let a = if repo.readAdapter != nil: repo.readAdapter else: repo.adapter
+      let rows = a.query(conn, sql, pkValues)
+      repo.releaseConn(conn, a)
 
       for row in rows:
         let child = load(row, Child)

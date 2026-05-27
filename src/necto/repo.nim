@@ -28,53 +28,64 @@ export base, query, schema, changeset, errors
 type
   RepoObj* = object of RootObj
     adapter*: Adapter
+    readAdapter*: Adapter
 
   Repo* = ref RepoObj
 
-proc newRepo*(adapter: Adapter): Repo =
-  Repo(adapter: adapter)
+proc newRepo*(adapter: Adapter; readAdapter: Adapter = nil): Repo =
+  Repo(adapter: adapter, readAdapter: if readAdapter != nil: readAdapter else: adapter)
 
 # --- Thread-local connection context (за транзакции) ---
 
 var threadLocalConn {.threadvar.}: Connection
 
-proc getConn*(repo: Repo): Connection =
-  ## Взема връзка. Ако сме в транзакция, връща същата връзка.
+proc getWriteConn*(repo: Repo): Connection =
+  ## Взема write връзка. Ако сме в транзакция, връща същата връзка.
   if threadLocalConn != nil:
     return threadLocalConn
   result = repo.adapter.connect()
 
-proc releaseConn*(repo: Repo, conn: Connection) =
+proc getReadConn*(repo: Repo): Connection =
+  ## Взема read връзка. Ако сме в транзакция, връща същата връзка (write).
+  if threadLocalConn != nil:
+    return threadLocalConn
+  let a = if repo.readAdapter != nil: repo.readAdapter else: repo.adapter
+  result = a.connect()
+
+proc releaseConn*(repo: Repo, conn: Connection; adapter: Adapter = nil) =
   ## Връща връзка в пула, освен ако е thread-local (транзакция).
   if threadLocalConn != nil:
     return
-  repo.adapter.disconnect(conn)
+  let a = if adapter != nil: adapter else: repo.adapter
+  a.disconnect(conn)
 
 # --- Raw SQL API (procs — не зависят от schema) ---
 
 proc exec*(repo: Repo, sql: string, args: seq[string] = @[]) =
-  ## Изпълнява raw SQL (DDL/DML) през адаптера.
-  let conn = repo.getConn()
+  ## Изпълнява raw SQL (DDL/DML) през write адаптера.
+  let conn = repo.getWriteConn()
   try:
     repo.adapter.exec(conn, sql, args)
   finally:
-    repo.releaseConn(conn)
+    repo.releaseConn(conn, repo.adapter)
 
 proc queryRaw*(repo: Repo, sql: string, args: seq[string] = @[]): seq[DbRow] =
-  ## Изпълнява raw SELECT и връща редовете.
-  let conn = repo.getConn()
+  ## Изпълнява raw SELECT през read адаптера.
+  let conn = repo.getReadConn()
+  let a = if repo.readAdapter != nil: repo.readAdapter else: repo.adapter
   try:
-    repo.adapter.query(conn, sql, args)
+    a.query(conn, sql, args)
   finally:
-    repo.releaseConn(conn)
+    repo.releaseConn(conn, a)
 
 proc scalar*(repo: Repo, sql: string, args: seq[string] = @[]): string =
-  ## Изпълнява raw SQL и връща скаларна стойност.
-  let conn = repo.getConn()
+  ## Изпълнява raw SQL през read адаптера и връща скалар.
+  let conn = repo.getReadConn()
+  let a = if repo.readAdapter != nil: repo.readAdapter else: repo.adapter
   try:
-    repo.adapter.scalar(conn, sql, args)
+    a.scalar(conn, sql, args)
   finally:
-    repo.releaseConn(conn)
+    repo.releaseConn(conn, a)
 
 proc poolMetrics*(repo: Repo): PoolMetrics =
   ## Връща метрики за connection pool-а.
@@ -87,10 +98,11 @@ template all*[T](repo: Repo, q: Query[T]): seq[T] =
   ## Ако Query има `.preload("...")`, асоциациите се зареждат автоматично.
   mixin load, schemaMeta
   block:
-    let conn = repo.getConn()
+    let conn = repo.getReadConn()
+    let a = if repo.readAdapter != nil: repo.readAdapter else: repo.adapter
     try:
       let bq = q.toBoundQuery()
-      let rows = repo.adapter.query(conn, bq.sql, bq.args)
+      let rows = a.query(conn, bq.sql, bq.args)
       var res: seq[T] = @[]
       for row in rows:
         res.add(load(row, T))
@@ -99,19 +111,20 @@ template all*[T](repo: Repo, q: Query[T]): seq[T] =
           autoPreloadAssocs(repo, res, q.preloadAssocs)
       res
     finally:
-      repo.releaseConn(conn)
+      repo.releaseConn(conn, a)
 
 template one*[T](repo: Repo, q: Query[T]): Option[T] =
   ## Връща един резултат или none.
   ## Ако Query има `.preload("...")`, асоциациите се зареждат автоматично.
   mixin load
   block:
-    let conn = repo.getConn()
+    let conn = repo.getReadConn()
+    let a = if repo.readAdapter != nil: repo.readAdapter else: repo.adapter
     try:
       var q2 = q
       q2 = q2.limit(1)
       let bq = q2.toBoundQuery()
-      let rows = repo.adapter.query(conn, bq.sql, bq.args)
+      let rows = a.query(conn, bq.sql, bq.args)
       if rows.len > 0:
         var res = @[load(rows[0], T)]
         if q2.preloadAssocs.len > 0:
@@ -121,24 +134,25 @@ template one*[T](repo: Repo, q: Query[T]): Option[T] =
       else:
         none(T)
     finally:
-      repo.releaseConn(conn)
+      repo.releaseConn(conn, a)
 
 template count*[T](repo: Repo, q: Query[T]): int64 =
   ## Връща брой редове.
   block:
-    let conn = repo.getConn()
+    let conn = repo.getReadConn()
+    let a = if repo.readAdapter != nil: repo.readAdapter else: repo.adapter
     try:
       var bq = q.toBoundQuery()
       # Заменяме SELECT ... с SELECT COUNT(*)
       let fromIdx = bq.sql.find(" FROM ")
       let countSql = "SELECT COUNT(*)" & bq.sql[fromIdx..^1]
-      let val = repo.adapter.scalar(conn, countSql, bq.args)
+      let val = a.scalar(conn, countSql, bq.args)
       if val.len > 0:
         parseBiggestInt(val)
       else:
         0'i64
     finally:
-      repo.releaseConn(conn)
+      repo.releaseConn(conn, a)
 
 # --- Auto-preload macros ---
 
@@ -382,7 +396,7 @@ template insert*[T](repo: Repo, cs: Changeset[T]): T =
   block:
     if cs.isInvalid():
       raise newException(ValidationError, "Cannot insert invalid changeset")
-    let conn = repo.getConn()
+    let conn = repo.getWriteConn()
     try:
       let meta = schemaMeta(T)
       let (sql, args) = buildInsertSql(cs, meta)
@@ -404,7 +418,7 @@ template insert*[T](repo: Repo, cs: Changeset[T]): T =
         raise ce
       raise
     finally:
-      repo.releaseConn(conn)
+      repo.releaseConn(conn, repo.adapter)
 
 template insert_all*(repo: Repo, changesets: auto): auto =
   ## Batch insert на множество changesets.
@@ -420,7 +434,7 @@ template insert_all*(repo: Repo, changesets: auto): auto =
       for cs in changesets:
         if cs.isInvalid():
           raise newException(ValidationError, "Cannot insert invalid changeset in batch")
-      let conn = repo.getConn()
+      let conn = repo.getWriteConn()
       try:
         let meta = schemaMeta(ItemType)
 
@@ -499,7 +513,7 @@ template insert_all*(repo: Repo, changesets: auto): auto =
         ce.constraintName = ""
         raise ce
       finally:
-        repo.releaseConn(conn)
+        repo.releaseConn(conn, repo.adapter)
 
 template insert_all*[T](repo: Repo, typ: typedesc[T], entries: seq[Table[string, string]]): seq[T] =
   ## Batch insert на raw entries без changeset.
@@ -511,7 +525,7 @@ template insert_all*[T](repo: Repo, typ: typedesc[T], entries: seq[Table[string,
     if entries.len == 0:
       @[]
     else:
-      let conn = repo.getConn()
+      let conn = repo.getWriteConn()
       try:
         let meta = schemaMeta(T)
 
@@ -562,7 +576,7 @@ template insert_all*[T](repo: Repo, typ: typedesc[T], entries: seq[Table[string,
         ce.constraintName = ""
         raise ce
       finally:
-        repo.releaseConn(conn)
+        repo.releaseConn(conn, repo.adapter)
 
 proc renumberPlaceholders(sql: string, offset: int): string =
   ## Преименува $N placeholders с offset.
@@ -587,7 +601,7 @@ template update_all*[T](repo: Repo, q: Query[T], changes: Table[string, string])
   ## Пример: repo.update_all(Query.fromSchema(User).where("active", Eq, "false"), {"active": "true"}.toTable)
   mixin schemaMeta
   block:
-    let conn = repo.getConn()
+    let conn = repo.getWriteConn()
     try:
       let meta = schemaMeta(T)
       var sets: seq[string] = @[]
@@ -633,7 +647,7 @@ template update_all*[T](repo: Repo, q: Query[T], changes: Table[string, string])
       
       repo.adapter.execAffected(conn, sql, values)
     finally:
-      repo.releaseConn(conn)
+      repo.releaseConn(conn, repo.adapter)
 
 template delete_all*[T](repo: Repo, q: Query[T]): int64 =
   ## Изтрива всички записи отговарящи на Query.
@@ -641,7 +655,7 @@ template delete_all*[T](repo: Repo, q: Query[T]): int64 =
   ## Пример: repo.delete_all(fromSchema(User).where("active", Eq, "false"))
   mixin schemaMeta
   block:
-    let conn = repo.getConn()
+    let conn = repo.getWriteConn()
     try:
       let meta = schemaMeta(T)
       let bq = q.toBoundQuery()
@@ -659,7 +673,7 @@ template delete_all*[T](repo: Repo, q: Query[T]): int64 =
       
       repo.adapter.execAffected(conn, sql, args)
     finally:
-      repo.releaseConn(conn)
+      repo.releaseConn(conn, repo.adapter)
 
 template update*[T](repo: Repo, cs: Changeset[T]): T =
   ## Актуализира запис от changeset.
@@ -668,7 +682,7 @@ template update*[T](repo: Repo, cs: Changeset[T]): T =
   block:
     if cs.isInvalid():
       raise newException(ValidationError, "Cannot update invalid changeset")
-    let conn = repo.getConn()
+    let conn = repo.getWriteConn()
     try:
       let meta = schemaMeta(T)
       let (sql, args) = buildUpdateSql(cs, meta)
@@ -726,20 +740,20 @@ template update*[T](repo: Repo, cs: Changeset[T]): T =
         raise ce
       raise
     finally:
-      repo.releaseConn(conn)
+      repo.releaseConn(conn, repo.adapter)
 
 template delete*[T](repo: Repo, cs: Changeset[T]): T =
   ## Изтрива запис от changeset.
   mixin schemaMeta
   block:
-    let conn = repo.getConn()
+    let conn = repo.getWriteConn()
     try:
       let meta = schemaMeta(T)
       let (sql, args) = buildDeleteSql(cs, meta)
       repo.adapter.exec(conn, sql, args)
       cs.data
     finally:
-      repo.releaseConn(conn)
+      repo.releaseConn(conn, repo.adapter)
 
 # --- Bang версии (вдигат грешка) ---
 
@@ -791,6 +805,9 @@ macro necto_repo*(name: untyped, body: untyped): untyped =
   var passVal = newLit("")
   var dbVal = newLit("postgres")
   var poolSizeVal = newLit(10)
+  var readHostVal: NimNode = nil
+  var readPortVal: NimNode = nil
+  var readPoolSizeVal: NimNode = nil
 
   for child in body:
     if child.kind in {nnkCall, nnkCommand}:
@@ -810,6 +827,12 @@ macro necto_repo*(name: untyped, body: untyped): untyped =
         dbVal = child[1]
       of "pool_size", "poolSize":
         poolSizeVal = child[1]
+      of "read_host":
+        readHostVal = child[1]
+      of "read_port":
+        readPortVal = child[1]
+      of "read_pool_size":
+        readPoolSizeVal = child[1]
 
   let typeName = name
   let procName = newIdentNode("new" & $name)
@@ -829,14 +852,48 @@ macro necto_repo*(name: untyped, body: untyped): untyped =
     )
   ))
 
-  result.add(quote do:
-    proc `procName`*(): `typeName` =
-      var adapter = newPostgresAdapter(
-        `hostVal`, `userVal`, `passVal`, `dbVal`,
-        port = `portVal`,
-        poolSize = `poolSizeVal`
-      )
-      result = `typeName`(adapter: adapter)
+  # Build the constructor body AST manually to avoid quote interpolation issues
+  var ctorBody = newStmtList()
+  ctorBody.add(newVarStmt(newIdentNode("adapter"),
+    newCall(newIdentNode("newPostgresAdapter"),
+      hostVal, userVal, passVal, dbVal, portVal, poolSizeVal
+    )
+  ))
 
+  if readHostVal != nil:
+    let rp = if readPortVal != nil: readPortVal else: portVal
+    let rps = if readPoolSizeVal != nil: readPoolSizeVal else: poolSizeVal
+    ctorBody.add(newVarStmt(newIdentNode("readAdapter"),
+      newCall(newIdentNode("newPostgresAdapter"),
+        readHostVal, userVal, passVal, dbVal, rp, rps
+      )
+    ))
+    ctorBody.add(nnkAsgn.newTree(newIdentNode("result"),
+      nnkObjConstr.newTree(typeName,
+        nnkExprColonExpr.newTree(newIdentNode("adapter"), newIdentNode("adapter")),
+        nnkExprColonExpr.newTree(newIdentNode("readAdapter"), newIdentNode("readAdapter"))
+      )
+    ))
+  else:
+    ctorBody.add(nnkAsgn.newTree(newIdentNode("result"),
+      nnkObjConstr.newTree(typeName,
+        nnkExprColonExpr.newTree(newIdentNode("adapter"), newIdentNode("adapter")),
+        nnkExprColonExpr.newTree(newIdentNode("readAdapter"), newIdentNode("adapter"))
+      )
+    ))
+
+  var ctorProc = newTree(nnkProcDef,
+    newTree(nnkPostfix, newIdentNode("*"), procName),
+    newEmptyNode(),
+    newEmptyNode(),
+    newTree(nnkFormalParams, typeName),
+    newEmptyNode(),
+    newEmptyNode(),
+    ctorBody
+  )
+
+  result.add(ctorProc)
+
+  result.add(quote do:
     let `instanceName`* = `procName`()
   )
