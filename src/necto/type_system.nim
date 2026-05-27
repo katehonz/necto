@@ -2,13 +2,67 @@
 ##
 ## Cast, load и dump между Nim типове и PostgreSQL типове.
 ##
-## Потребителите могат да дефинират custom types чрез overload на:
+## === NectoType конвенция (формален интерфейс за custom типове) ===
+##
+## За да дефинирате свой собствен тип, който работи с necto_schema,
+## overload-нете следните 4 proc-а:
+##
 ##   proc dbType*(T: typedesc[MyType]): string
-##   proc castValue*(val: string, T: typedesc[MyType]): T
-##   proc loadValue*(val: string, T: typedesc[MyType]): T
+##     → връща PostgreSQL името на типа (напр. "bigint", "numeric")
+##
+##   proc castValue*(val: string, T: typedesc[MyType]): MyType
+##     → конвертира от user input (HTTP params, форми) към Nim стойност
+##
+##   proc loadValue*(val: string, T: typedesc[MyType]): MyType
+##     → конвертира от PostgreSQL резултат (текстов формат) към Nim стойност
+##
 ##   proc dumpValue*(val: MyType): string
+##     → конвертира от Nim стойност към PostgreSQL-съвместим текстов формат
+##
+##  Препоръчително (но не задължително):
+##   proc `$`*(val: MyType): string   — за debug/display
+##   proc `==`*(a, b: MyType): bool  — за сравнение
+##
+##  След като дефинирате типа и overload-нете proc-овете, регистрирайте го
+##  чрез registerNectoType, за да работи в necto_schema макрото:
+##
+##   registerNectoType(MyType)
+##
+##  Пример — виж Money типът в postgres_types.nim.
+##
+##  Тази конвенция е вдъхновена от Ecto.Type behaviour (Elixir):
+##    type/0   → dbType
+##    cast/1   → castValue
+##    load/1   → loadValue
+##    dump/1   → dumpValue
 
-import std/[strutils, options, json, times]
+import std/[strutils, options, json, times, tables]
+
+# --- Custom type registry (compile-time) ---
+
+var nectoTypeRegistry {.compileTime.}: Table[string, string]
+
+template registerNectoType*(T: typedesc) =
+  ## Регистрира custom тип за използване в necto_schema макрото.
+  ## Трябва да се извика СЛЕД като сте overload-нали dbType, castValue, loadValue, dumpValue.
+  ##
+  ## Пример:
+  ##   type MyMoney = distinct int64
+  ##   proc dbType*(T: typedesc[MyMoney]): string = "bigint"
+  ##   proc loadValue*(val: string, T: typedesc[MyMoney]): MyMoney = MyMoney(parseBiggestInt(val))
+  ##   proc dumpValue*(val: MyMoney): string = $int64(val)
+  ##   proc castValue*(val: string, T: typedesc[MyMoney]): MyMoney = MyMoney(parseBiggestInt(val))
+  ##   registerNectoType(MyMoney)
+  static:
+    nectoTypeRegistry[$T] = dbType(T)
+
+proc resolveCustomDbType*(nimTypeStr: string): string {.compileTime.} =
+  ## Проверява custom type registry-то за подадения Nim тип (като низ).
+  ## Връща dbType стринга или празен низ ако типът не е регистриран.
+  if nimTypeStr in nectoTypeRegistry:
+    result = nectoTypeRegistry[nimTypeStr]
+  else:
+    result = ""
 
 # --- Custom types ---
 
@@ -452,3 +506,53 @@ proc castToDb*(val: string, nimTypeStr: string): string =
         result = val
     else:
       result = val
+
+# --- Typed JSONB (Nim Superpower) ---
+##
+## JsonB[T] е wrapper който пази JSONB в PostgreSQL но дава типизиран Nim достъп.
+## Това е възможно само в compile-to-native език — Ecto не може да го направи.
+##
+## Пример:
+##   type UserSettings = object
+##     theme: string
+##     notifications: bool
+##
+##   necto_schema User:
+##     field settings: JsonB[UserSettings]
+##
+##   let user = repo.one(...)
+##   echo user.settings.val.theme          # типизиран достъп!
+##   echo user.settings.val.notifications
+
+type
+  JsonB*[T] = object
+    ## Типизиран JSONB wrapper.
+    ## Достъп до стойността чрез `.val`.
+    val*: T
+
+converter toJsonBInner*[T](jb: JsonB[T]): T =
+  ## Автоматично разопакова JsonB[T] → T (за аргументи на функции).
+  jb.val
+
+proc dbType*[T](B: typedesc[JsonB[T]]): string = "jsonb"
+
+proc loadValue*[T](val: string, B: typedesc[JsonB[T]]): JsonB[T] =
+  ## Load JSONB стринг от PostgreSQL в типизиран JsonB[T].
+  if val.len == 0 or val == "null":
+    result = JsonB[T](val: default(T))
+  else:
+    result = JsonB[T](val: parseJson(val).to(T))
+
+proc dumpValue*[T](val: JsonB[T]): string =
+  ## Dump типизиран JsonB[T] към PostgreSQL JSONB стринг.
+  $ %val.val
+
+proc castValue*[T](val: string, B: typedesc[JsonB[T]]): JsonB[T] =
+  ## Cast от user input (JSON стринг) към JsonB[T].
+  loadValue(val, JsonB[T])
+
+proc `$`*[T](jb: JsonB[T]): string =
+  $ %jb.val
+
+proc `==`*[T](a, b: JsonB[T]): bool =
+  $ %a.val == $ %b.val

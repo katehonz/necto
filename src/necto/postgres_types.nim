@@ -122,3 +122,13 @@ proc castValue*(val: string, T: typedesc[Money]): Money =
 
 proc `$`*(m: Money): string = $int64(m)
 proc `==`*(a, b: Money): bool = int64(a) == int64(b)
+
+# --- Регистриране на типовете за necto_schema макрото ---
+
+registerNectoType(PgPoint)
+registerNectoType(PgInet)
+registerNectoType(PgCidr)
+registerNectoType(PgMacAddr)
+registerNectoType(PgTsVector)
+registerNectoType(PgTsQuery)
+registerNectoType(Money)

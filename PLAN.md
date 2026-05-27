@@ -225,8 +225,8 @@ proc castFields*[T](cs: Changeset[T], permitted: openArray[string]): Changeset[T
 - [x] `has_one` — batch preload
 - [x] `preload` в Repo: `repo.allWithPreload(Query.fromSchema(Post), "author")`
 - [x] `preload` в Repo (single): `repo.oneWithPreload(Query.fromSchema(Post), "author")`
-- [ ] `preload` в Query: `Query.from(Post).preload(:author)` (repo автоматично)
-- [ ] `build_assoc` / `assoc` helper-и
+- [x] `preload` в Query: `Query.from(Post).preload(:author)` (repo автоматично)
+- [x] `build_assoc` / `assoc` helper-и
 
 ### Фаза 4: Advanced Changeset — ГОТОВО
 - [x] `validate_confirmation`, `validate_exclusion`

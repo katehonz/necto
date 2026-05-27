@@ -44,3 +44,5 @@ testresults/
 # OS
 .DS_Store
 Thumbs.db
+tests/t_jsonb
+tests/t_read_replica

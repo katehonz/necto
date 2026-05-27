@@ -14,7 +14,7 @@
 ##     changeset register(params):
 ##       this |> castFields(params, @["name", "email"]) |> validateRequired(@["name", "email"])
 
-import std/[macros, tables, strutils, times]
+import std/[macros, tables, strutils, times, json]
 import ./type_system
 import ./adapters/base
 
@@ -99,8 +99,10 @@ proc nimTypeToString(node: NimNode): string =
       result = "Option[" & nimTypeToString(node[1]) & "]"
     elif base == "seq":
       result = "seq[" & nimTypeToString(node[1]) & "]"
+    elif base == "JsonB":
+      result = "JsonB[" & nimTypeToString(node[1]) & "]"
     else:
-      result = $node
+      result = base & "[" & nimTypeToString(node[1]) & "]"
   of nnkSym:
     result = $node
   else:
@@ -114,24 +116,31 @@ proc stringToNimType(typeStr: string): NimNode =
   elif typeStr.startsWith("seq["):
     let inner = stringToNimType(typeStr[4..^2])
     result = nnkBracketExpr.newTree(newIdentNode("seq"), inner)
+  elif typeStr.startsWith("JsonB["):
+    let inner = stringToNimType(typeStr[6..^2])
+    result = nnkBracketExpr.newTree(newIdentNode("JsonB"), inner)
   else:
     result = newIdentNode(typeStr)
 
-proc dbTypeForNim(nimType: string): string =
+proc dbTypeForNim*(nimType: string): string {.compileTime.} =
+  ## Връща PostgreSQL типа за даден Nim тип (като низ).
+  ## За built-in типове ползва `dbType()` overload-ите от type_system.
+  ## За custom типове проверява `nectoTypeRegistry` (registerNectoType).
+  ## За PostgreSQL-специфични типове (PgPoint, etc.) ползва хардкоднати стойности.
   case nimType
-  of "string": "text"
-  of "int", "int32": "integer"
-  of "int16": "smallint"
-  of "int64": "bigint"
-  of "float", "float64": "double precision"
-  of "bool": "boolean"
-  of "DateTime": "timestamp with time zone"
-  of "Date": "date"
-  of "TimeOfDay": "time without time zone"
-  of "JsonNode": "jsonb"
-  of "Uuid": "uuid"
-  of "Decimal": "numeric"
-  of "seq[byte]": "bytea"
+  of "string": dbType(string)
+  of "int", "int32": dbType(int)
+  of "int16": dbType(int16)
+  of "int64": dbType(int64)
+  of "float", "float64": dbType(float)
+  of "bool": dbType(bool)
+  of "DateTime": dbType(DateTime)
+  of "Date": dbType(Date)
+  of "TimeOfDay": dbType(TimeOfDay)
+  of "JsonNode": dbType(JsonNode)
+  of "Uuid": dbType(Uuid)
+  of "Decimal": dbType(Decimal)
+  of "seq[byte]": dbType(seq[byte])
   of "PgPoint": "point"
   of "PgInet": "inet"
   of "PgCidr": "cidr"
@@ -140,7 +149,14 @@ proc dbTypeForNim(nimType: string): string =
   of "PgTsQuery": "tsquery"
   of "Money": "bigint"
   else:
-    if nimType.startsWith("Option["):
+    # Провери custom type registry първо
+    let custom = resolveCustomDbType(nimType)
+    if custom.len > 0:
+      return custom
+    # Generics: JsonB[T], Option[T], seq[T]
+    if nimType.startsWith("JsonB["):
+      "jsonb"
+    elif nimType.startsWith("Option["):
       dbTypeForNim(nimType[7..^2])
     elif nimType.startsWith("seq["):
       let inner = nimType[4..^2]
