@@ -98,9 +98,9 @@ PostgreSQL JSONB оператори интегрирани в Query builder:
 - ✅ **Zero-copy array loading** — slice-based `pgArrayElements` iterator + specialized fast paths за `seq[int]`, `seq[int64]`, `seq[float]`, `seq[bool]`
 - **Compile-time query plan caching** — EXPLAIN планове кеширани на compile time
 
-### Фаза 3: Production ready
+### Фаза 3: Production ready (в progress)
+- ✅ **Soft deletes** — `soft_deletes` pragma в schema + `includeDeleted()`/`onlyDeleted()`/`hardDelete()`
 - **Streaming** (`repo.stream`) — cursor-based streaming за големи резултати
-- **Soft deletes** — built-in `deleted_at` + `.excludeDeleted()`
 - **Migration locking** — advisory locks за конкурентни миграции
 - **Prepared statement cache** — per-connection кеширане
 - **FTS DSL** — type-safe full-text search
@@ -125,6 +125,7 @@ PostgreSQL JSONB оператори интегрирани в Query builder:
 | **Fixed-point Decimal** | ✅ | ❌ | `FixedDecimal[Scale]` — compile-time scaled |
 | **Zero-copy array loading** | ✅ | ❌ | Slice-based parsing за `seq[int]`/`seq[int64]`/`seq[float]`/`seq[bool]` |
 | **Compile-time JSON paths** | ✅ | ❌ | `whereJsonbIt` macro за type-safe JSONB path queries |
+| **Soft deletes** | ✅ | ⚠️ | `soft_deletes` pragma + `includeDeleted()`/`onlyDeleted()` |
 | **Compile-time schema verification** | ✅ | ❌ | `-d:nectoVerify` проверява таблици/колони при компилация |
 | **Compile-time query verification** | ✅ | ❌ | EXPLAIN-based validation при стартиране |
 | **Schema reverse engineering** | ✅ | ❌ | `necto_gen_schema` от `information_schema` |

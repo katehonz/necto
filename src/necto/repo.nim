@@ -410,6 +410,22 @@ proc buildDeleteSql(cs: auto, meta: SchemaMeta): (string, seq[string]) =
             meta.primaryKeyField & "\" = $1"
   result = (sql, @[pkVal])
 
+proc buildSoftDeleteSql(cs: auto, meta: SchemaMeta): (string, seq[string]) =
+  ## Генерира UPDATE SQL за soft delete.
+  var pkVal: string = ""
+  for f in meta.fields:
+    if f.primaryKey:
+      if cs.changes.hasKey(f.name):
+        pkVal = cs.changes[f.name]
+      break
+
+  if pkVal.len == 0:
+    raise newException(ValidationError, "Cannot soft-delete without primary key value")
+
+  let sql = "UPDATE \"" & meta.tableName & "\" SET \"deleted_at\" = NOW() WHERE \"" &
+            meta.primaryKeyField & "\" = $1 AND \"deleted_at\" IS NULL"
+  result = (sql, @[pkVal])
+
 # --- Constraint Error Handling (Ecto pattern) ---
 
 proc parseConstraintName*(errorMsg: string): string =
@@ -877,6 +893,24 @@ template update*[T](repo: Repo, cs: Changeset[T]): T =
 
 template delete*[T](repo: Repo, cs: Changeset[T]): T =
   ## Изтрива запис от changeset.
+  ## Ако schema-та има soft_deletes, прави soft delete (UPDATE deleted_at).
+  mixin schemaMeta
+  block:
+    let conn = repo.getWriteConn()
+    try:
+      let meta = schemaMeta(T)
+      if meta.softDeletes:
+        let (sql, args) = buildSoftDeleteSql(cs, meta)
+        repo.adapter.exec(conn, sql, args)
+      else:
+        let (sql, args) = buildDeleteSql(cs, meta)
+        repo.adapter.exec(conn, sql, args)
+      cs.data
+    finally:
+      repo.releaseConn(conn, repo.adapter)
+
+template hardDelete*[T](repo: Repo, cs: Changeset[T]): T =
+  ## Винаги прави истински DELETE, независимо от soft_deletes.
   mixin schemaMeta
   block:
     let conn = repo.getWriteConn()
@@ -902,6 +936,9 @@ proc `update!`*[T](repo: Repo, cs: Changeset[T]): T =
 
 proc `delete!`*[T](repo: Repo, cs: Changeset[T]): T =
   result = repo.delete(cs)
+
+proc `hardDelete!`*[T](repo: Repo, cs: Changeset[T]): T =
+  result = repo.hardDelete(cs)
 
 # --- Transaction API ---
 

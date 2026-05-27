@@ -78,6 +78,7 @@ type
     aggregates*: seq[AggregateClause]
     groupByFields*: seq[string]
     havingClauses*: seq[HavingClause]
+    includeDeletedVal*: bool  ## За soft deletes: включва изтрити редове
 
   BoundQuery* = object
     ## SQL с $N placeholders + отделени аргументи.
@@ -124,6 +125,19 @@ proc setDistinct*[T](q: Query[T]): Query[T] =
 proc preload*[T](q: Query[T], assoc: string): Query[T] =
   result = q
   result.preloadAssocs.add(assoc)
+
+proc includeDeleted*[T](q: Query[T]): Query[T] =
+  ## Включва soft-deleted редове в резултатите.
+  result = q
+  result.includeDeletedVal = true
+
+proc onlyDeleted*[T](q: Query[T]): Query[T] =
+  ## Връща само soft-deleted редове.
+  result = q
+  result.includeDeletedVal = true
+  result.whereClauses.add(WhereClause(
+    field: "deleted_at", op: NotNull, value: "", conjunction: "AND"
+  ))
 
 # --- Join операции ---
 
@@ -328,10 +342,17 @@ template toBoundQuery*[T](q: Query[T]): BoundQuery =
     for j in q.joinClauses:
       parts.add(j.joinType & " JOIN " & j.table & " ON " & j.on)
 
-  if q.whereClauses.len > 0:
+  var hasWhere = q.whereClauses.len > 0 or (meta.softDeletes and not q.includeDeletedVal)
+  if hasWhere:
     parts.add("WHERE")
     var wheres: seq[string] = @[]
     var isFirst = true
+
+    # Soft delete filter
+    if meta.softDeletes and not q.includeDeletedVal:
+      wheres.add("\"deleted_at\" IS NULL")
+      isFirst = false
+
     for w in q.whereClauses:
       if not isFirst:
         wheres.add(w.conjunction)

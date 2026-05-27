@@ -52,6 +52,7 @@ type
     fields*: seq[FieldMeta]
     primaryKeyField*: string
     associations*: seq[AssocMeta]
+    softDeletes*: bool  ## Ако true, schema-та поддържа soft deletes
 
 # --- Reflection helpers ---
 
@@ -201,6 +202,7 @@ macro necto_schema*(name: untyped, body: untyped): untyped =
   var rowLoadAssignments: seq[NimNode] = @[]
   var changesetFuncs: seq[NimNode] = @[]
   var hasVerify = false
+  var hasSoftDeletes = false
   var verifyFields: seq[(string, string, string, string, bool, bool, bool)] = @[]
 
   for child in body:
@@ -233,6 +235,33 @@ macro necto_schema*(name: untyped, body: untyped): untyped =
           rowLoadAssignments.add(quote do:
             result.`tsId` = loadValue(row[`idx`], DateTime)
           )
+
+      elif cmdName == "soft_deletes":
+        hasSoftDeletes = true
+        let fi = newIdentNode("deleted_at")
+        let optDt = newTree(nnkBracketExpr, newIdentNode("Option"), newIdentNode("DateTime"))
+        fieldDefs.add(newIdentDefs(fi, optDt))
+        constructorAssignments.add(
+          nnkAsgn.newTree(nnkDotExpr.newTree(newIdentNode("result"), fi), newCall(newIdentNode("none"), newIdentNode("DateTime")))
+        )
+        let idx = fieldMetaNodes.len
+        fieldMetaNodes.add(nnkObjConstr.newTree(
+          newIdentNode("FieldMeta"),
+          nnkExprColonExpr.newTree(newIdentNode("name"), newLit("deleted_at")),
+          nnkExprColonExpr.newTree(newIdentNode("dbColumn"), newLit("deleted_at")),
+          nnkExprColonExpr.newTree(newIdentNode("nimType"), newLit("Option[DateTime]")),
+          nnkExprColonExpr.newTree(newIdentNode("dbType"), newLit("timestamp with time zone")),
+          nnkExprColonExpr.newTree(newIdentNode("primaryKey"), newLit(false)),
+          nnkExprColonExpr.newTree(newIdentNode("autoIncrement"), newLit(false)),
+          nnkExprColonExpr.newTree(newIdentNode("nullable"), newLit(true)),
+          nnkExprColonExpr.newTree(newIdentNode("unique"), newLit(false)),
+          nnkExprColonExpr.newTree(newIdentNode("defaultValue"), newLit("")),
+          nnkExprColonExpr.newTree(newIdentNode("virtual"), newLit(false)),
+          nnkExprColonExpr.newTree(newIdentNode("isTimestamp"), newLit(false))
+        ))
+        rowLoadAssignments.add(quote do:
+          result.deleted_at = loadValue(row[`idx`], Option[DateTime])
+        )
 
     elif child.kind in {nnkCall, nnkCommand}:
       # Команди с име и аргументи: table "x", field x: y, belongs_to x: Y
@@ -603,12 +632,13 @@ macro necto_schema*(name: untyped, body: untyped): untyped =
         nnkExprColonExpr.newTree(newIdentNode("primaryKeyField"), newLit(primaryKeyField)),
         nnkExprColonExpr.newTree(newIdentNode("associations"),
           newTree(nnkPrefix, newIdentNode("@"), newTree(nnkBracket))
-        )
+        ),
+        nnkExprColonExpr.newTree(newIdentNode("softDeletes"), newLit(hasSoftDeletes))
       )
     )
   )
   for am in assocMetaNodes:
-    schemaMetaLet[0][2][^1][1][1].add(am)
+    schemaMetaLet[0][2][4][1][1].add(am)
 
   # --- Генериране на конструктор ---
   let newProcName = newIdentNode("new" & schemaName)
