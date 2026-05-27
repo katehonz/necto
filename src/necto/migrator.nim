@@ -10,7 +10,7 @@
 ##   migrator.rollback(1)    # отменя последната миграция
 ##   migrator.status()       # показва статус на всички
 
-import std/[strutils, times, sequtils, sets, algorithm, os]
+import std/[strutils, times, sequtils, sets, algorithm, os, hashes]
 import ./migration
 import ./repo
 import ./errors
@@ -23,10 +23,39 @@ type
   Migrator* = ref object
     repo*: Repo
     migrationsTable*: string
+    disableLock*: bool  ## Ако true, не използва advisory locks
 
 proc newMigrator*(repo: Repo, migrationsTable: string = "necto_schema_migrations"): Migrator =
   ## Създава нов Migrator с подаден Repo.
-  Migrator(repo: repo, migrationsTable: migrationsTable)
+  Migrator(repo: repo, migrationsTable: migrationsTable, disableLock: false)
+
+# --- Advisory lock ---
+
+proc advisoryLockId(migrationsTable: string): int64 =
+  ## Генерира стабилен advisory lock ID от името на миграционната таблица.
+  let h = hash(migrationsTable)
+  result = abs(h).int64
+
+proc withAdvisoryLock*(mig: Migrator, body: proc()) =
+  ## Изпълнява body под PostgreSQL advisory lock.
+  ## Блокира докато lock не е наличен. Освобождава lock в finally.
+  if mig.disableLock:
+    body()
+    return
+
+  let lockId = advisoryLockId(mig.migrationsTable)
+  let conn = mig.repo.getWriteConn()
+  try:
+    let lockSql = "SELECT pg_advisory_lock(" & $lockId & ")"
+    mig.repo.adapter.exec(conn, lockSql)
+    body()
+  finally:
+    let unlockSql = "SELECT pg_advisory_unlock(" & $lockId & ")"
+    try:
+      mig.repo.adapter.exec(conn, unlockSql)
+    except DatabaseError:
+      discard
+    mig.repo.releaseConn(conn, mig.repo.adapter)
 
 # --- Bootstrap ---
 
@@ -102,31 +131,36 @@ proc migrate*(mig: Migrator, steps: int = 0): int =
   ## Ако steps > 0: изпълнява точно steps на брой.
   ##
   ## Връща броя изпълнени миграции.
-  let pending = mig.pendingMigrations()
-  if pending.len == 0:
-    echo "No pending migrations."
-    return 0
+  ## Използва PostgreSQL advisory lock за да предотврати конкурентни миграции.
+  var count = 0
+  mig.withAdvisoryLock(proc() =
+    let pending = mig.pendingMigrations()
+    if pending.len == 0:
+      echo "No pending migrations."
+      return
 
-  var toRun = pending
-  if steps > 0 and steps < toRun.len:
-    toRun = toRun[0..<steps]
+    var toRun = pending
+    if steps > 0 and steps < toRun.len:
+      toRun = toRun[0..<steps]
 
-  echo "Running ", toRun.len, " migration(s)..."
-  for entry in toRun:
-    let migration = entry.factory()
-    let ver = entry.version
-    let nm = entry.name
-    let cs = entry.checksum
-    echo "  → ", ver, " ", nm
+    echo "Running ", toRun.len, " migration(s)..."
+    for entry in toRun:
+      let migration = entry.factory()
+      let ver = entry.version
+      let nm = entry.name
+      let cs = entry.checksum
+      echo "  → ", ver, " ", nm
 
-    mig.repo.transaction proc() =
-      migration.up(mig.repo)
-      mig.recordMigration(ver, nm, cs)
+      mig.repo.transaction proc() =
+        migration.up(mig.repo)
+        mig.recordMigration(ver, nm, cs)
 
-    echo "    ✓ applied"
+      echo "    ✓ applied"
 
-  echo "Done. ", toRun.len, " migration(s) applied."
-  result = toRun.len
+    echo "Done. ", toRun.len, " migration(s) applied."
+    count = toRun.len
+  )
+  result = count
 
 proc rollback*(mig: Migrator, steps: int = 1): int =
   ## Отменя последните N миграции.
@@ -134,58 +168,66 @@ proc rollback*(mig: Migrator, steps: int = 1): int =
   ## rollback се прекратява с грешка за сигурност.
   ##
   ## Връща броя отменени миграции.
-  let applied = mig.appliedMigrations()
-  if applied.len == 0:
-    echo "No migrations to rollback."
-    return 0
+  ## Използва PostgreSQL advisory lock.
+  var count = 0
+  mig.withAdvisoryLock(proc() =
+    let applied = mig.appliedMigrations()
+    if applied.len == 0:
+      echo "No migrations to rollback."
+      return
 
-  var toRollback: seq[(string, string, string)]
-  if steps >= applied.len:
-    toRollback = applied
-  else:
-    toRollback = applied[^(steps)..^1]
+    var toRollback: seq[(string, string, string)]
+    if steps >= applied.len:
+      toRollback = applied
+    else:
+      toRollback = applied[^(steps)..^1]
 
-  toRollback.reverse()  # от най-новата към най-старата
+    toRollback.reverse()  # от най-новата към най-старата
 
-  echo "Rolling back ", toRollback.len, " migration(s)..."
-  for (version, name, dbChecksum) in toRollback:
-    # Намираме миграцията по version
-    var migration: Migration = nil
-    var registeredChecksum = ""
-    for entry in allMigrations():
-      if entry.version == version:
-        migration = entry.factory()
-        registeredChecksum = entry.checksum
-        break
+    echo "Rolling back ", toRollback.len, " migration(s)..."
+    for (version, name, dbChecksum) in toRollback:
+      # Намираме миграцията по version
+      var migration: Migration = nil
+      var registeredChecksum = ""
+      for entry in allMigrations():
+        if entry.version == version:
+          migration = entry.factory()
+          registeredChecksum = entry.checksum
+          break
 
-    if migration == nil:
-      echo "  ⚠ Migration ", version, " not found in registry, skipping."
-      continue
+      if migration == nil:
+        echo "  ⚠ Migration ", version, " not found in registry, skipping."
+        continue
 
-    # Checksum validation
-    if dbChecksum.len > 0 and registeredChecksum.len > 0 and dbChecksum != registeredChecksum:
-      raise newException(MigrationError,
-        "Checksum mismatch for migration " & version & 
-        ": the migration file has been modified since it was applied. " &
-        "Rollback aborted for safety. Expected: " & dbChecksum & 
-        ", got: " & registeredChecksum)
+      # Checksum validation
+      if dbChecksum.len > 0 and registeredChecksum.len > 0 and dbChecksum != registeredChecksum:
+        raise newException(MigrationError,
+          "Checksum mismatch for migration " & version & 
+          ": the migration file has been modified since it was applied. " &
+          "Rollback aborted for safety. Expected: " & dbChecksum & 
+          ", got: " & registeredChecksum)
 
-    let v = version
-    let n = name
-    echo "  ← ", v, " ", n
-    mig.repo.transaction proc() =
-      migration.down(mig.repo)
-      mig.removeMigration(v)
-    echo "    ✓ rolled back"
+      let v = version
+      let n = name
+      echo "  ← ", v, " ", n
+      mig.repo.transaction proc() =
+        migration.down(mig.repo)
+        mig.removeMigration(v)
+      echo "    ✓ rolled back"
 
-  echo "Done. ", toRollback.len, " migration(s) rolled back."
-  result = toRollback.len
+    echo "Done. ", toRollback.len, " migration(s) rolled back."
+    count = toRollback.len
+  )
+  result = count
 
 proc redo*(mig: Migrator, steps: int = 1) =
   ## Преизпълнява последните N миграции (down + up).
-  let rolled = mig.rollback(steps)
-  if rolled > 0:
-    discard mig.migrate(rolled)
+  ## Използва PostgreSQL advisory lock.
+  mig.withAdvisoryLock(proc() =
+    let rolled = mig.rollback(steps)
+    if rolled > 0:
+      discard mig.migrate(rolled)
+  )
 
 proc status*(mig: Migrator) =
   ## Показва статус на всички миграции.
@@ -210,9 +252,12 @@ proc status*(mig: Migrator) =
 
 proc reset*(mig: Migrator) =
   ## Rollback всички миграции (опасно! за dev/test).
-  let applied = mig.appliedMigrations()
-  if applied.len > 0:
-    discard mig.rollback(applied.len)
+  ## Използва PostgreSQL advisory lock.
+  mig.withAdvisoryLock(proc() =
+    let applied = mig.appliedMigrations()
+    if applied.len > 0:
+      discard mig.rollback(applied.len)
+  )
 
 proc generateMigrationFile*(name: string, dir: string = "migrations"): string =
   ## Генерира skeleton на миграционен файл.

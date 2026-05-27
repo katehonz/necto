@@ -29,6 +29,8 @@ when isMainModule:
   for i, arg in args:
     if arg == "--step" and i + 1 < args.len:
       steps = parseInt(args[i + 1])
+    elif arg == "--no-lock":
+      migrator.disableLock = true
 
   echo "Rolling back ", steps, " migration(s)..."
   discard migrator.rollback(steps)

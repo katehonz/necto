@@ -54,10 +54,12 @@ when isMainModule:
   let args = commandLineParams()
   var steps = 0
 
-  # Парсване на --step N
+  # Парсване на --step N и --no-lock
   for i, arg in args:
     if arg == "--step" and i + 1 < args.len:
       steps = parseInt(args[i + 1])
+    elif arg == "--no-lock":
+      migrator.disableLock = true
 
   if steps > 0:
     echo "Running up to ", steps, " migration(s)..."

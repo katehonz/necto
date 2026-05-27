@@ -101,7 +101,7 @@ PostgreSQL JSONB оператори интегрирани в Query builder:
 ### Фаза 3: Production ready (в progress)
 - ✅ **Soft deletes** — `soft_deletes` pragma в schema + `includeDeleted()`/`onlyDeleted()`/`hardDelete()`
 - **Streaming** (`repo.stream`) — cursor-based streaming за големи резултати
-- **Migration locking** — advisory locks за конкурентни миграции
+- ✅ **Migration locking** — PostgreSQL advisory locks (`pg_advisory_lock`) в `migrate`/`rollback`/`redo`/`reset`
 - **Prepared statement cache** — per-connection кеширане
 - **FTS DSL** — type-safe full-text search
 - **Subqueries / CTEs** — `WITH` clauses и correlated subqueries
@@ -126,6 +126,7 @@ PostgreSQL JSONB оператори интегрирани в Query builder:
 | **Zero-copy array loading** | ✅ | ❌ | Slice-based parsing за `seq[int]`/`seq[int64]`/`seq[float]`/`seq[bool]` |
 | **Compile-time JSON paths** | ✅ | ❌ | `whereJsonbIt` macro за type-safe JSONB path queries |
 | **Soft deletes** | ✅ | ⚠️ | `soft_deletes` pragma + `includeDeleted()`/`onlyDeleted()` |
+| **Migration locking** | ✅ | ❌ | PostgreSQL advisory locks за конкурентни миграции |
 | **Compile-time schema verification** | ✅ | ❌ | `-d:nectoVerify` проверява таблици/колони при компилация |
 | **Compile-time query verification** | ✅ | ❌ | EXPLAIN-based validation при стартиране |
 | **Schema reverse engineering** | ✅ | ❌ | `necto_gen_schema` от `information_schema` |
