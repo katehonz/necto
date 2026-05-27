@@ -240,6 +240,83 @@ necto_schema User:
   has_one profile: Profile
 ```
 
+### many_to_many
+
+Join-table association with automatic preload:
+
+```nim
+necto_schema User:
+  table "users"
+  field id: int64 {.primary_key.}
+  many_to_many roles: Role through "user_roles"
+```
+
+Adds a virtual `roles: seq[Role]` field. The join table is specified via `through`.
+
+## Soft Deletes
+
+Add `soft_deletes` to mark records as deleted instead of removing them:
+
+```nim
+necto_schema Post:
+  table "posts"
+  field id: int64 {.primary_key.}
+  field title: string
+  soft_deletes
+```
+
+This adds `deleted_at: Option[DateTime]` and changes delete behavior:
+- `repo.delete(cs)` → `UPDATE SET deleted_at = NOW()`
+- `repo.hardDelete(cs)` → true `DELETE`
+- Queries auto-filter `WHERE deleted_at IS NULL`
+- `.includeDeleted()` / `.onlyDeleted()` query modifiers
+
+## Embedded Schemas
+
+Store nested Nim objects in a single JSONB column:
+
+```nim
+type Profile = object
+  bio: string
+  avatar_url: string
+
+necto_schema User:
+  table "users"
+  field id: int64 {.primary_key.}
+  embeds_one profile: Profile  # stored as JSONB
+```
+
+`embeds_many` stores a JSONB array:
+
+```nim
+type Address = object
+  street: string
+  city: string
+
+necto_schema User:
+  embeds_many addresses: Address
+```
+
+## Multi-Tenant (schema_prefix)
+
+Route queries to different PostgreSQL schemas:
+
+```nim
+necto_schema Post:
+  table "posts"
+  schema_prefix "tenant_42"  # → "tenant_42"."posts"
+  field id: int64 {.primary_key.}
+  field title: string
+```
+
+Runtime override:
+
+```nim
+repo.setTenant("tenant_99")
+let posts = repo.all(fromSchema(Post))  # → "tenant_99"."posts"
+repo.clearTenant()  # back to schema_prefix
+```
+
 ## Reverse Schema Generation
 
 If you already have a PostgreSQL database, Necto can introspect it and generate the schema code for you.

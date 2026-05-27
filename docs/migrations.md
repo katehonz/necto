@@ -72,6 +72,27 @@ nimble rollback
 nimble migrate_status
 ```
 
+## Change Block (Auto-Reversible)
+
+Use `change` instead of `up`/`down` for simple reversible operations:
+
+```nim
+necto_migration CreateUsers, "20260526120000":
+  change:
+    createTable repo, "users", cols(pk("id"), col("name", "text")) & timestamps()
+    createIndex repo, "users", @["name"]
+```
+
+The `down` is inferred automatically: `createTable` ↔ `dropTable`, `addColumn` ↔ `dropColumn`, `addIndex` ↔ `dropIndex`, `renameTable`/`renameColumn` are reversible.
+
+## Checksum Validation
+
+Migrations are checksummed (`up` + `down` body MD5). On rollback, Necto verifies the checksum matches what was recorded when the migration was applied. If a migration file was modified after applying, rollback aborts with a clear error — preventing silent data corruption.
+
+## Advisory Locks
+
+All `migrate`/`rollback` operations use PostgreSQL advisory locks (`pg_advisory_lock`) to prevent race conditions during concurrent deployments.
+
 ## How It Works
 
 1. **Bootstrap** — creates `necto_schema_migrations` table if missing

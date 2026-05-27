@@ -99,7 +99,7 @@ suite "Repo CRUD integration":
     check(after.availableConns >= 0)
 
   test "Transaction rollback removes inserted data":
-    testrepoInstance.transaction:
+    testrepoInstance.transaction do ():
       testrepoInstance.exec(
         "INSERT INTO test_users (name, email, age) VALUES ($1, $2, $3)",
         @["RollbackTest", "rollback@test.com", "99"]
@@ -113,7 +113,7 @@ suite "Repo CRUD integration":
     check(count == "0")
 
   test "Savepoint allows partial rollback":
-    testrepoInstance.transaction:
+    testrepoInstance.transaction do ():
       testrepoInstance.exec(
         "INSERT INTO test_users (name, email, age) VALUES ($1, $2, $3)",
         @["SavepointOuter", "outer@test.com", "10"]
@@ -145,7 +145,7 @@ suite "Repo CRUD integration":
 
   test "inTransaction returns correct state":
     check(not testrepoInstance.inTransaction())
-    testrepoInstance.transaction:
+    testrepoInstance.transaction do ():
       check(testrepoInstance.inTransaction())
 
   test "Upsert doNothing ignores duplicate":

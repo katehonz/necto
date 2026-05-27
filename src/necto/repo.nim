@@ -40,6 +40,13 @@ proc newRepo*(adapter: Adapter; readAdapter: Adapter = nil): Repo =
 var threadLocalConn {.threadvar.}: Connection
 var savepointStack {.threadvar.}: seq[string]
 
+# Tenant aliases (дефинирани в query.nim, re-export за удобство)
+proc setTenant*(repo: Repo, tenant: string) =
+  setQueryTenant(tenant)
+
+proc clearTenant*(repo: Repo) =
+  clearQueryTenant()
+
 proc inTransaction*(repo: Repo): bool =
   ## Връща true ако сме в транзакция.
   threadLocalConn != nil

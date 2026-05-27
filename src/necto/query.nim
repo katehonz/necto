@@ -83,6 +83,12 @@ type
     havingClauses*: seq[HavingClause]
     includeDeletedVal*: bool  ## За soft deletes: включва изтрити редове
     windowFunctions*: seq[string]  ## Window function SQL изрази
+    ctes*: seq[CteClause]  ## CTE (WITH) клаузи
+
+  CteClause* = object
+    ## CTE дефиниция: WITH name AS (query)
+    name*: string
+    query*: BoundQuery
 
   BoundQuery* = object
     ## SQL с $N placeholders + отделени аргументи.
@@ -176,6 +182,29 @@ proc fullJoin*[T](q: Query[T], table: string, on: string): Query[T] =
   ## Добавя FULL OUTER JOIN.
   result = q
   result.joinClauses.add(JoinClause(joinType: "FULL OUTER", table: table, on: on))
+
+# --- CTE (Common Table Expressions) ---
+
+proc withCte*[T](q: Query[T], name: string, cteQ: auto): Query[T] =
+  ## Добавя CTE (WITH) клауза от друга заявка.
+  ## Пример:
+  ##   let totals = fromSchema(Order).select("user_id").sum("total", "spent").groupBy("user_id")
+  ##   let q = fromSchema(User).withCte("user_totals", totals)
+  result = q
+  let bq = cteQ.toBoundQuery()
+  result.ctes.add(CteClause(name: name, query: bq))
+
+proc joinCte*[T](q: Query[T], cteName: string, localField: string, cteField: string,
+                  joinType: string = "INNER"): Query[T] =
+  ## JOIN към CTE по две полета.
+  ## Пример: `.joinCte("user_totals", "id", "user_id")`
+  ## Генерира: `INNER JOIN user_totals ON user_totals.cteField = localField`
+  result = q
+  result.joinClauses.add(JoinClause(
+    joinType: joinType,
+    table: cteName,
+    on: cteName & "." & cteField & " = " & localField
+  ))
 
 # --- Агрегати ---
 
@@ -505,6 +534,16 @@ proc orderByTsRankCd*[T](q: Query[T], field: string, tsq: SqlFragment,
 
 # --- SQL Генерация с parameter binding ---
 
+var queryTenantPrefix {.threadvar.}: string
+
+proc setQueryTenant*(tenant: string) =
+  ## Задава текущия tenant prefix за multi-tenant заявки.
+  queryTenantPrefix = tenant
+
+proc clearQueryTenant*() =
+  ## Изчиства текущия tenant prefix.
+  queryTenantPrefix = ""
+
 template toBoundQuery*[T](q: Query[T]): BoundQuery =
   ## Превръща Query в SQL с `$N` placeholders + seq от стойности.
   ## Template за да резолвира schemaMeta(T) в scope-а на извикване.
@@ -513,6 +552,19 @@ template toBoundQuery*[T](q: Query[T]): BoundQuery =
   var parts: seq[string] = @[]
   var args: seq[string] = @[]
   var idx = 1
+
+  # CTE (WITH) клаузи
+  if q.ctes.len > 0:
+    var cteParts: seq[string] = @[]
+    for cte in q.ctes:
+      var cteSql = cte.query.sql
+      for i in 1..30:
+        cteSql = cteSql.replace($"$" & $i, $"$" & $(idx + i - 1))
+      cteParts.add(cte.name & " AS (" & cteSql & ")")
+      for arg in cte.query.args:
+        args.add(arg)
+        inc idx
+    parts.add("WITH " & cteParts.join(", "))
 
   parts.add("SELECT")
   if q.distinctVal:
@@ -545,7 +597,12 @@ template toBoundQuery*[T](q: Query[T]): BoundQuery =
     parts.add("*")
 
   parts.add("FROM")
-  parts.add("\"" & meta.tableName & "\"")
+  let prefix = if queryTenantPrefix.len > 0: queryTenantPrefix
+               else: meta.schemaPrefix
+  if prefix.len > 0:
+    parts.add("\"" & prefix & "\".\"" & meta.tableName & "\"")
+  else:
+    parts.add("\"" & meta.tableName & "\"")
 
   # Joins
   if q.joinClauses.len > 0:

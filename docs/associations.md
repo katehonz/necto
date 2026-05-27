@@ -76,6 +76,39 @@ for u in users:
 
 Result: `Table[int64, Profile]`
 
+### many_to_many
+
+Join-table association:
+
+```nim
+necto_schema User:
+  table "users"
+  field id: int64 {.primary_key.}
+  many_to_many roles: Role through "user_roles"
+```
+
+Preload via `allWithPreload`:
+
+```nim
+let users = repo.allWithPreload(fromSchema(User), "roles")
+# Roles are loaded via the join table in 2 queries
+```
+
+### build_assoc
+
+Create a child changeset with the foreign key pre-filled:
+
+```nim
+let postCs = repo.build_assoc(user, Post, {"title": "Hello"}.toTable)
+# postCs has author_id = user.id
+```
+
+For associations with explicit name (e.g. when a table has multiple FKs to the same parent):
+
+```nim
+let reviewCs = repo.build_assoc(article, Comment, {"body": "Great!"}.toTable, assocName = "reviewer")
+```
+
 ## Auto-Preload Macros
 
 For convenience, Repo provides macros that run the query **and** preload associations in one call:

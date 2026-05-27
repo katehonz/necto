@@ -21,6 +21,12 @@ type
     poolExhaustedCount*: int64
     availableConns*: int
 
+  PrepStmtMetrics* = object
+    ## Метрики за prepared statement cache.
+    hits*: int64
+    misses*: int64
+    cached*: int
+
   Adapter* = ref object of RootObj
     ## Абстрактен базов адаптер.
     host*: string
@@ -92,3 +98,62 @@ method rollbackToSavepoint*(a: Adapter, conn: Connection, name: string) {.base.}
 method poolMetrics*(a: Adapter): PoolMetrics {.base.} =
   ## Връща метрики за connection pool-а. Базовата имплементация връща празни метрики.
   PoolMetrics()
+
+method prepStmtMetrics*(a: Adapter): PrepStmtMetrics {.base.} =
+  ## Връща метрики за prepared statement cache. Базовата имплементация връща празни метрики.
+  PrepStmtMetrics()
+
+method slowQueryCount*(a: Adapter): int64 {.base.} =
+  ## Връща броя на бавните заявки. Базовата имплементация връща 0.
+  0
+
+proc toPrometheus*(m: PoolMetrics; namespace: string = "necto"): string =
+  ## Експортира метриките в Prometheus текстов формат.
+  ## Може да се използва директно в HTTP endpoint:
+  ##   resp Http200, @[("Content-Type", "text/plain")], repo.adapter.poolMetrics().toPrometheus()
+  result = ""
+  result.add("# HELP " & namespace & "_pool_total_requests Total number of connection requests\n")
+  result.add("# TYPE " & namespace & "_pool_total_requests counter\n")
+  result.add(namespace & "_pool_total_requests " & $m.totalRequests & "\n\n")
+
+  result.add("# HELP " & namespace & "_pool_wait_ms_total Cumulative wait time for connections (ms)\n")
+  result.add("# TYPE " & namespace & "_pool_wait_ms_total counter\n")
+  result.add(namespace & "_pool_wait_ms_total " & $(m.totalWaitMs * 1000.0).int64 & "\n\n")
+
+  result.add("# HELP " & namespace & "_pool_wait_ms_max Max wait time for a connection (ms)\n")
+  result.add("# TYPE " & namespace & "_pool_wait_ms_max gauge\n")
+  result.add(namespace & "_pool_wait_ms_max " & $(m.maxWaitMs * 1000.0).int64 & "\n\n")
+
+  result.add("# HELP " & namespace & "_pool_active_connections_peak Peak number of active connections\n")
+  result.add("# TYPE " & namespace & "_pool_active_connections_peak gauge\n")
+  result.add(namespace & "_pool_active_connections_peak " & $m.peakActiveConns & "\n\n")
+
+  result.add("# HELP " & namespace & "_pool_exhausted_count Total times the pool was exhausted\n")
+  result.add("# TYPE " & namespace & "_pool_exhausted_count counter\n")
+  result.add(namespace & "_pool_exhausted_count " & $m.poolExhaustedCount & "\n\n")
+
+  result.add("# HELP " & namespace & "_pool_available_connections Currently available connections in pool\n")
+  result.add("# TYPE " & namespace & "_pool_available_connections gauge\n")
+  result.add(namespace & "_pool_available_connections " & $m.availableConns & "\n")
+
+proc toPrometheus*(m: PrepStmtMetrics; namespace: string = "necto"): string =
+  ## Експортира prepared statement метриките в Prometheus текстов формат.
+  result = ""
+  result.add("# HELP " & namespace & "_prepstmt_hits_total Total prepared statement cache hits\n")
+  result.add("# TYPE " & namespace & "_prepstmt_hits_total counter\n")
+  result.add(namespace & "_prepstmt_hits_total " & $m.hits & "\n\n")
+
+  result.add("# HELP " & namespace & "_prepstmt_misses_total Total prepared statement cache misses\n")
+  result.add("# TYPE " & namespace & "_prepstmt_misses_total counter\n")
+  result.add(namespace & "_prepstmt_misses_total " & $m.misses & "\n\n")
+
+  result.add("# HELP " & namespace & "_prepstmt_cached Number of cached prepared statements\n")
+  result.add("# TYPE " & namespace & "_prepstmt_cached gauge\n")
+  result.add(namespace & "_prepstmt_cached " & $m.cached & "\n")
+
+proc toPrometheus*(pool: PoolMetrics, prep: PrepStmtMetrics; namespace: string = "necto"): string =
+  ## Експортира всички метрики (pool + prepared statements) в един Prometheus скрап.
+  result = pool.toPrometheus(namespace)
+  if result.len > 0 and result[^1] != '\n':
+    result.add("\n")
+  result.add(prep.toPrometheus(namespace))

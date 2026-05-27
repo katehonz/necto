@@ -16,6 +16,7 @@ type
   PgConnection* = ref object of Connection
     ## Обвивка около DbConn за проследяване.
     dbConn*: pg.DbConn
+    preparedStmts*: Table[string, string]  ## sql → stmtName (per-connection cache)
 
   PostgresAdapter* = ref object of Adapter
     ## PostgreSQL адаптер с вграден connection pool.
@@ -33,6 +34,9 @@ type
     metricsMaxWaitNs: int64
     metricsPeakActiveConns: int
     metricsPoolExhaustedCount: int64
+    # Prepared statement cache metrics
+    metricsPrepStmtHits: int64
+    metricsPrepStmtMisses: int64
     # Query timeout
     queryTimeoutMs*: int  # 0 = disabled
     slowQueryThresholdMs*: int  # 0 = disabled
@@ -81,6 +85,8 @@ proc newPostgresAdapter*(host, user, password, database: string;
     metricsMaxWaitNs: 0,
     metricsPeakActiveConns: 0,
     metricsPoolExhaustedCount: 0,
+    metricsPrepStmtHits: 0,
+    metricsPrepStmtMisses: 0,
     queryTimeoutMs: queryTimeoutMs,
     slowQueryThresholdMs: slowQueryThresholdMs,
     metricsSlowQueryCount: 0
@@ -138,48 +144,52 @@ proc checkSlowQuery(a: PostgresAdapter, elapsedNs: int64) =
 method slowQueryCount*(a: PostgresAdapter): int64 =
   a.metricsSlowQueryCount
 
+method prepStmtMetrics*(a: PostgresAdapter): PrepStmtMetrics =
+  ## Връща prepared statement метрики: (hits, misses, брой кеширани SQL-а).
+  withLock a.prepLock:
+    result = PrepStmtMetrics(hits: a.metricsPrepStmtHits, misses: a.metricsPrepStmtMisses,
+                              cached: a.preparedCache.len)
+
 # --- Low-level prepared statement + parameter binding ---
 
 proc pgQuery(a: PostgresAdapter, conn: PgConnection, sql: string, args: seq[string]): libpq.PPGresult =
-  ## Изпълнява SQL с adapter-level prepared statement cache.
+  ## Изпълнява SQL с per-connection prepared statement cache.
   var arr = allocCStringArray(args)
   defer: deallocCStringArray(arr)
 
   var stmtName: string
-  var cached = false
-  withLock a.prepLock:
-    if a.preparedCache.hasKey(sql):
-      stmtName = a.preparedCache[sql]
-      cached = true
+  var needPrepare = false
 
-  if cached:
-    # Try existing prepared statement on this connection
+  # Check per-connection cache first
+  if conn.preparedStmts.hasKey(sql):
+    # Already prepared on this connection
+    stmtName = conn.preparedStmts[sql]
     result = libpq.pqexecPrepared(conn.dbConn, stmtName.cstring, int32(args.len), arr, nil, nil, 0)
     let status = libpq.pqresultStatus(result)
-    if status == libpq.PGRES_FATAL_ERROR:
-      # Statement doesn't exist on this connection — prepare it
-      libpq.pqclear(result)
-      let prepRes = libpq.pqprepare(conn.dbConn, stmtName.cstring, sql.cstring, int32(args.len), nil)
-      let prepStatus = libpq.pqresultStatus(prepRes)
-      libpq.pqclear(prepRes)
-      if prepStatus == libpq.PGRES_COMMAND_OK:
-        result = libpq.pqexecPrepared(conn.dbConn, stmtName.cstring, int32(args.len), arr, nil, nil, 0)
-      else:
-        # Fallback to direct execParams
-        result = libpq.pqexecParams(conn.dbConn, sql.cstring, int32(args.len), nil, arr, nil, nil, 0)
+    if status != libpq.PGRES_FATAL_ERROR:
+      inc a.metricsPrepStmtHits
+      return
+    # Prepared statement was lost (e.g. connection reset) — re-prepare
+    libpq.pqclear(result)
+    needPrepare = true
   else:
-    # First time seeing this SQL — prepare and cache
+    needPrepare = true
+
+  if needPrepare:
+    inc a.metricsPrepStmtMisses
+    # Generate unique stmt name per attempt — avoids conflicts
+    # when the same PG connection is reused across different PgConnection wrappers.
     inc a.stmtCounter
     stmtName = "necto_p" & $a.stmtCounter
+
     let prepRes = libpq.pqprepare(conn.dbConn, stmtName.cstring, sql.cstring, int32(args.len), nil)
     let prepStatus = libpq.pqresultStatus(prepRes)
     libpq.pqclear(prepRes)
     if prepStatus == libpq.PGRES_COMMAND_OK:
-      withLock a.prepLock:
-        a.preparedCache[sql] = stmtName
+      conn.preparedStmts[sql] = stmtName
       result = libpq.pqexecPrepared(conn.dbConn, stmtName.cstring, int32(args.len), arr, nil, nil, 0)
     else:
-      # Fallback to direct execParams
+      # Fallback to direct execParams (also handles "already exists" errors safely)
       result = libpq.pqexecParams(conn.dbConn, sql.cstring, int32(args.len), nil, arr, nil, nil, 0)
 
 proc pgExec(a: PostgresAdapter, conn: PgConnection, sql: string, args: seq[string]) =
@@ -241,7 +251,7 @@ proc pgAffected(a: PostgresAdapter, conn: PgConnection, sql: string, args: seq[s
 method connect*(a: PostgresAdapter): Connection =
   ## Връща PgConnection с checkout-ната връзка.
   let db = a.checkout()
-  PgConnection(dbConn: db)
+  PgConnection(dbConn: db, preparedStmts: initTable[string, string]())
 
 method disconnect*(a: PostgresAdapter, conn: Connection) =
   ## Връща връзката обратно в пула.
@@ -304,16 +314,36 @@ method fetchCursor*(a: PostgresAdapter, conn: Connection, cursorName: string,
   pgSelect(a, pgConn, sql, @[])
 
 method beginTransaction*(a: PostgresAdapter, conn: Connection) =
-  a.exec(conn, "BEGIN", @[])
+  ## Използваме pqexec директно за транзакционни команди,
+  ## за да избегнем проблеми с prepared statements при abort-нати транзакции.
+  let pgConn = PgConnection(conn)
+  let res = libpq.pqexec(pgConn.dbConn, "BEGIN")
+  let status = libpq.pqresultStatus(res)
+  libpq.pqclear(res)
+  if status != libpq.PGRES_COMMAND_OK:
+    raise newException(DatabaseError, "BEGIN failed: " & $libpq.pqErrorMessage(pgConn.dbConn))
 
 method commitTransaction*(a: PostgresAdapter, conn: Connection) =
-  a.exec(conn, "COMMIT", @[])
+  let pgConn = PgConnection(conn)
+  let res = libpq.pqexec(pgConn.dbConn, "COMMIT")
+  let status = libpq.pqresultStatus(res)
+  libpq.pqclear(res)
+  if status != libpq.PGRES_COMMAND_OK:
+    raise newException(DatabaseError, "COMMIT failed: " & $libpq.pqErrorMessage(pgConn.dbConn))
 
 method rollbackTransaction*(a: PostgresAdapter, conn: Connection) =
-  a.exec(conn, "ROLLBACK", @[])
+  ## Използваме pqexec директно, защото при abort-ната транзакция
+  ## prepared statements (чрез pgExec) не работят.
+  let pgConn = PgConnection(conn)
+  let res = libpq.pqexec(pgConn.dbConn, "ROLLBACK")
+  libpq.pqclear(res)
 
 method savepoint*(a: PostgresAdapter, conn: Connection, name: string) =
-  a.exec(conn, "SAVEPOINT " & name, @[])
+  let pgConn = PgConnection(conn)
+  let res = libpq.pqexec(pgConn.dbConn, ("SAVEPOINT " & name).cstring)
+  libpq.pqclear(res)
 
 method rollbackToSavepoint*(a: PostgresAdapter, conn: Connection, name: string) =
-  a.exec(conn, "ROLLBACK TO SAVEPOINT " & name, @[])
+  let pgConn = PgConnection(conn)
+  let res = libpq.pqexec(pgConn.dbConn, ("ROLLBACK TO SAVEPOINT " & name).cstring)
+  libpq.pqclear(res)

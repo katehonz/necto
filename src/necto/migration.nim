@@ -12,7 +12,8 @@
 ##     down:
 ##       dropTable repo, "users"
 
-import std/[macros, strutils, tables, sequtils, algorithm, md5]
+import std/[macros, strutils, tables, sequtils, algorithm]
+import checksums/md5
 import ./adapters/base
 import ./repo
 import ./errors

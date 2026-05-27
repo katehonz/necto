@@ -239,23 +239,45 @@ proc castFields*[T](cs: Changeset[T], permitted: openArray[string]): Changeset[T
 - [x] `put_change`, `force_change`, `delete_change`
 - [x] `apply_changes` — връща обект без запис в БД
 
-### Фаза 5: Advanced Migrations
+### ✅ Фаза 5: Advanced Migrations — ГОТОВО
 - [x] `rename_table`, `rename_column`
 - [x] `add_index`, `drop_index` (concurrent)
 - [x] `add_reference`, `remove_reference`
 - [x] `execute` — raw SQL в миграция
-- [ ] Migration rollback с `up`/`down` checksum валидация
+- [x] Migration rollback с `up`/`down` checksum валидация
+- [x] Advisory lock за concurrent миграции
+- [x] `change` блок с автоматично reverse
 
-### Фаза 6: Performance и Production readiness
-- [ ] Prepared statement cache (per connection)
-- [ ] Batch insert: `insert_all(schemas, entries)`
-- [ ] Connection pool metrics (wait time, active conns)
-- [ ] Query timeout и slow query log
-- [ ] Read replica support: `repo.read()` vs `repo.write()`
+### ✅ Фаза 6: Performance и Production readiness — ГОТОВО
+- [x] Prepared statement cache (per-connection, per-adapter) с метрики
+- [x] Batch insert: `insert_all(changesets)` + `insert_all(T, entries)`
+- [x] Batch update/delete: `update_all(query, changes)`, `delete_all(query)`
+- [x] Connection pool metrics — wait time, active conns, peak, exhausted (Prometheus формат)
+- [x] Query timeout (`statement_timeout`) и slow query log
+- [x] Read replica support: `readAdapter`, read/write routing
 
-### Фаза 7: Async (бъдеще)
+### ✅ Фаза 7: Advanced Features — ГОТОВО
+- [x] **Soft deletes** — `soft_deletes` в schema, `includeDeleted`/`onlyDeleted`/`hardDelete`
+- [x] **Streaming** — `StreamIterator`, `forStream` за големи резултати
+- [x] **Full-Text Search** — `whereTsVectorMatches`, `toTsVector`, `plaintoTsQuery`, `tsRank`
+- [x] **Typed JSONB** — `JsonB[T]` с автоматична сериализация/десериализация
+- [x] **Embedded schemas** — `embeds_one`, `embeds_many` (typed JSONB)
+- [x] **Transaction savepoints** — `repo.savepoint(name):`, `repo.rollbackTo(name)`
+- [x] **Many-to-many** — `many_to_many` асоциации с join таблица
+- [x] **Multi (Ecto.Multi)** — `repo.multi(:step1, ...)` транзакционни композиции
+- [x] **Window functions** — `row_number()`, `rank()`, `lag()` и др.
+- [x] **PostgreSQL типове** — `PgTsVector`, `PgTsQuery`, `PgCidr`, `PgMacAddr`, `Money` и др.
+- [x] **Zero-copy arrays** — PostgreSQL arrays без копиране
+- [x] **Auth модул** — bcrypt пароли, JWT токени
+- [x] **Compile-time verification** — `necto_verify`, `verifyQuery`
+- [x] **Schema reverse engineering** — `necto_gen_schema`
+
+### 🔮 Фаза 8: Бъдеще
+- [ ] Multi-tenant support — `schema_prefix` / `tenant_id` filtering
 - [ ] Async adapter върху `asyncpg` или `pgasync`
 - [ ] `async` варианти на `all`, `one`, `insert`, `update`
+- [ ] Интеграция с Karax/Jester/Prologue
+- [ ] Observable metrics с OpenTelemetry
 
 ---
 

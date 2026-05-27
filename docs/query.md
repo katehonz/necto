@@ -228,14 +228,18 @@ let q = fromSchema(User)
 
 ## CTEs (Common Table Expressions)
 
-Chain `.withCte()` to add `WITH` clauses. Multiple CTEs are supported.
+Chain `.withCte()` to add `WITH` clauses. Use `.joinCte()` for convenient joins.
 
 ```nim
-let cteQ = fromSchema(User).where("active", Eq, "true")
-let q = fromSchema(Order)
-  .withCte("active_users", cteQ)
-  .innerJoin("active_users", "orders.user_id = active_users.id")
+let totals = fromSchema(Order)
+  .select("user_id").sum("total", "total_spent").groupBy("user_id")
+
+let q = fromSchema(User)
+  .withCte("user_totals", totals)
+  .joinCte("user_totals", "\"users\".\"id\"", "user_id")
 ```
+
+Multiple CTEs are supported — placeholders are renumbered automatically across all CTE clauses and the outer query.
 
 ## Full-Text Search (FTS)
 
@@ -269,6 +273,45 @@ Available query functions:
 | `tsRankCd(field, tsq)` | `ts_rank_cd(field, tsq)` |
 
 All fragments support parameter binding — values never leak into SQL strings.
+
+## JSONB Query Operators
+
+PostgreSQL JSONB operators as first-class query methods:
+
+```nim
+# @> contains
+let q = fromSchema(User).whereJsonbContains("data", """{"role":"admin"}""")
+
+# ? has key
+let q2 = fromSchema(User).whereJsonbHasKey("tags", "urgent")
+
+# ?| has any keys
+let q3 = fromSchema(User).whereJsonbHasAnyKeys("tags", @["urgent", "vip"])
+
+# ?& has all keys
+let q4 = fromSchema(User).whereJsonbHasAllKeys("tags", @["urgent", "customer"])
+```
+
+### Type-safe JSONB paths (whereJsonbIt)
+
+Compile-time JSONB path extraction:
+
+```nim
+let q = fromSchema(User).whereJsonbIt(profile.settings.theme == "dark")
+# Generates: WHERE "profile" #>> '{settings,theme}' = $1
+```
+
+## Window Functions
+
+Add window function SQL expressions to queries:
+
+```nim
+let q = fromSchema(Employee)
+  .rowNumber(partitionBy = @["department"], orderByField = "salary", orderDir = Desc)
+  .select("department", "name", "salary")
+```
+
+Available window functions: `rowNumber()`, `rank()`, `denseRank()`, `lag()`, `lead()`, `ntile()`, `firstValue()`, `lastValue()`, `nthValue()`. Window frame definitions are built with `over()` helper.
 
 ## SQL Injection Safety
 

@@ -49,6 +49,7 @@ type
 
   SchemaMeta* = object
     tableName*: string
+    schemaPrefix*: string  ## schema_prefix (за multi-tenant)
     fields*: seq[FieldMeta]
     primaryKeyField*: string
     associations*: seq[AssocMeta]
@@ -203,7 +204,9 @@ macro necto_schema*(name: untyped, body: untyped): untyped =
   var changesetFuncs: seq[NimNode] = @[]
   var hasVerify = false
   var hasSoftDeletes = false
+  var schemaPrefix = ""
   var verifyFields: seq[(string, string, string, string, bool, bool, bool)] = @[]
+  var staticFkCheckNodes: seq[NimNode] = @[]
 
   for child in body:
     if child.kind == nnkIdent:
@@ -269,6 +272,9 @@ macro necto_schema*(name: untyped, body: untyped): untyped =
 
       if cmdName == "table":
         discard  # вече обработено
+
+      elif cmdName == "schema_prefix":
+        schemaPrefix = $child[1]
 
       elif cmdName == "field":
         ## AST: Command(Ident "field", Ident "fieldName", StmtList(<type-expr>))
@@ -381,6 +387,20 @@ macro necto_schema*(name: untyped, body: untyped): untyped =
         constructorAssignments.add(
           nnkAsgn.newTree(nnkDotExpr.newTree(newIdentNode("result"), ptrField), newNilLit())
         )
+
+        # Compile-time static FK integrity check
+        # Verifies that the target type has an 'id: int64' primary key field.
+        let targetTypeIdent = newIdentNode(assocType)
+        let checkErrMsg = "Static FK check failed: " & assocType &
+                          " must have an 'id: int64' primary key field for belongs_to '" &
+                          assocName & "' in " & schemaName
+        let fkCheckNode = quote do:
+          when not compiles(block:
+            proc checkFk(x: `targetTypeIdent`) =
+              var y: int64 = x.id
+          ):
+            {.error: `checkErrMsg`.}
+        staticFkCheckNodes.add(fkCheckNode)
 
         # AssocMeta
         assocMetaNodes.add(nnkObjConstr.newTree(
@@ -633,7 +653,8 @@ macro necto_schema*(name: untyped, body: untyped): untyped =
         nnkExprColonExpr.newTree(newIdentNode("associations"),
           newTree(nnkPrefix, newIdentNode("@"), newTree(nnkBracket))
         ),
-        nnkExprColonExpr.newTree(newIdentNode("softDeletes"), newLit(hasSoftDeletes))
+        nnkExprColonExpr.newTree(newIdentNode("softDeletes"), newLit(hasSoftDeletes)),
+        nnkExprColonExpr.newTree(newIdentNode("schemaPrefix"), newLit(schemaPrefix))
       )
     )
   )
@@ -730,8 +751,13 @@ macro necto_schema*(name: untyped, body: untyped): untyped =
   )
 
   # --- Генериране на typedesc dispatch за schemaMeta и load ---
+  var fkCheckStmtList = newStmtList()
+  for check in staticFkCheckNodes:
+    fkCheckStmtList.add(check)
+
   let dispatchProcs = quote do:
     proc schemaMeta*(T: typedesc[`typeName`]): SchemaMeta =
+      `fkCheckStmtList`
       `schemaMetaConst`
 
     proc load*(row: DbRow, T: typedesc[`typeName`]): `typeName` =

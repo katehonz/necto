@@ -65,3 +65,7 @@ tests/t_soft_deletes
 tests/t_migration_lock
 tests/t_streaming
 tests/t_window_functions
+tests/t_auth
+tests/t_cte
+tests/t_tenant
+src/necto/auth

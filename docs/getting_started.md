@@ -145,7 +145,7 @@ var cs = newChangeset(newUser(), {
 }.toTable)
 cs = cs.castFields(@["name", "email", "age"])
   .validateRequired(@["name", "email"])
-let user = repo.insert!(cs)
+let user = repo.insert(cs)
 
 # READ
 let users = repo.all(
@@ -155,12 +155,12 @@ let users = repo.all(
 # UPDATE
 var cs2 = newChangeset(user, {"name": "Alice Smith"}.toTable)
 cs2 = cs2.castFields(@["name"])
-let updated = repo.update!(cs2)
+let updated = repo.update(cs2)
 
 # DELETE
 var cs3 = newChangeset(updated, initTable[string, string]())
 cs3.changes["id"] = $updated.id
-repo.delete!(cs3)
+repo.delete(cs3)
 
 # Batch insert
 var css: seq[Changeset[User]] = @[]
@@ -212,10 +212,11 @@ See [Schema Verification](./verification.md) for details.
 
 ## 6. Next Steps
 
-- [Schema](./schema.md) — fields, types, associations, timestamps, reverse generation, custom types, typed JSONB
-- [Query DSL](./query.md) — where, orderBy, joins, aggregates, compileQuery, verifyQuery, pipe operator
+- [Schema](./schema.md) — fields, types, associations, soft deletes, embedded schemas, multi-tenant, typed JSONB
+- [Query DSL](./query.md) — where, joins, aggregates, CTEs, FTS, JSONB, window functions, subqueries, pipe
+- [Changesets](./changeset.md) — cast, validations, constraints, batch operations
+- [Associations & Preload](./associations.md) — belongs_to, has_many, has_one, many_to_many, build_assoc, N+1 safe
+- [Migrations](./migrations.md) — up/down, change blocks, checksum validation, advisory locks
 - [Schema & Query Verification](./verification.md) — compile-time DB checks, query validation, CI/CD integration
-- [Changesets](./changeset.md) — cast, validations, constraints, batch validation
-- [Associations & Preload](./associations.md) — belongs_to, has_many, N+1 safe loading, auto-preload
 - [Migrations](./migrations.md) — DSL, versioning, rollback
 - [Benchmarks](./benchmarks.md) — performance comparison vs raw SQL
