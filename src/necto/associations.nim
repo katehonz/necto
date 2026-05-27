@@ -186,6 +186,56 @@ template preloadHasMany*[Parent, Child](repo: Repo, parents: seq[Parent]): Table
 
     childGroups
 
+# --- Preload: ManyToMany (Parent PK ↔ Join Table ↔ Child PK) ---
+
+template preloadManyToMany*[Parent, Child](repo: Repo, parents: seq[Parent], joinTable: string): Table[int64, seq[Child]] =
+  ## Зарежда many_to_many асоциация през join таблица.
+  ## Parent.id → joinTable.{parent}_id + joinTable.{child}_id → Child.id
+  mixin schemaMeta, load, getFieldValRuntime
+  var childGroups: Table[int64, seq[Child]] = initTable[int64, seq[Child]]()
+
+  if parents.len == 0:
+    childGroups
+  else:
+    let parentMeta = schemaMeta(Parent)
+    let childMeta = schemaMeta(Child)
+
+    let parentFk = toLowerAscii($Parent) & "_id"
+    let childFk = toLowerAscii($Child) & "_id"
+
+    # Събираме всички parent PK стойности
+    var pkValues: seq[string] = @[]
+    var pkSet: HashSet[string] = initHashSet[string]()
+    for p in parents:
+      let pkVal = getFieldValRuntime(p, parentMeta.primaryKeyField)
+      if pkVal.len > 0 and pkVal notin pkSet:
+        pkSet.incl(pkVal)
+        pkValues.add(pkVal)
+
+    if pkValues.len > 0:
+      let placeholders = buildInPlaceholders(pkValues.len)
+      let sql = "SELECT \"" & childMeta.tableName & "\".*, j.\"" & parentFk & "\" as __parent_id__ " &
+                "FROM \"" & childMeta.tableName & "\" INNER JOIN \"" & joinTable & "\" j " &
+                "ON \"" & childMeta.tableName & "\".\"" & childMeta.primaryKeyField & "\" = j.\"" & childFk & "\" " &
+                "WHERE j.\"" & parentFk & "\" IN (" & placeholders.join(", ") & ")"
+
+      let conn = repo.getReadConn()
+      let a = if repo.readAdapter != nil: repo.readAdapter else: repo.adapter
+      let rows = a.query(conn, sql, pkValues)
+      repo.releaseConn(conn, a)
+
+      for row in rows:
+        # Последната колона е __parent_id__
+        let parentIdVal = row[^1]
+        let childRow = row[0..^2]  # всички колони без __parent_id__
+        let child = load(childRow, Child)
+        let parentId = parseBiggestInt(parentIdVal)
+        if not childGroups.hasKey(parentId):
+          childGroups[parentId] = @[]
+        childGroups[parentId].add(child)
+
+    childGroups
+
 # --- Preload: HasOne (Parent PK ← Child FK) ---
 
 template preloadHasOne*[Parent, Child](repo: Repo, parents: seq[Parent]): Table[int64, Child] =

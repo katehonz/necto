@@ -37,7 +37,7 @@ type
     isTimestamp*: bool
 
   AssocKind* = enum
-    akBelongsTo, akHasMany, akHasOne
+    akBelongsTo, akHasMany, akHasOne, akManyToMany
 
   AssocMeta* = object
     name*: string
@@ -45,6 +45,7 @@ type
     targetSchema*: string
     foreignKey*: string
     ownerKey*: string
+    joinTable*: string  ## За many_to_many — името на join таблицата
 
   SchemaMeta* = object
     tableName*: string
@@ -415,6 +416,117 @@ macro necto_schema*(name: untyped, body: untyped): untyped =
           nnkExprColonExpr.newTree(newIdentNode("ownerKey"), newLit("id"))
         ))
 
+      elif cmdName == "many_to_many":
+        ## AST: Command(Ident "many_to_many", Ident "assocName",
+        ##               StmtList(Command(Ident "TargetType", Command(Ident "through", StrLit "joinTable"))))
+        let assocName = $child[1]
+        var targetType = ""
+        var joinTable = ""
+        if child.len >= 3 and child[2].kind == nnkStmtList and child[2].len >= 1:
+          let typeNode = child[2][0]
+          if typeNode.kind == nnkCommand and typeNode.len >= 2:
+            targetType = $typeNode[0]
+            let throughCmd = typeNode[1]
+            if throughCmd.kind == nnkCommand and throughCmd.len >= 2 and $throughCmd[0] == "through":
+              joinTable = $throughCmd[1]
+            else:
+              joinTable = toLowerAscii(schemaName) & "_" & toLowerAscii(targetType)
+          elif typeNode.kind == nnkIdent:
+            targetType = $typeNode
+            joinTable = toLowerAscii(schemaName) & "_" & toLowerAscii(targetType)
+
+        # Виртуално поле: roles: seq[TargetType]
+        let seqType = newTree(nnkBracketExpr, newIdentNode("seq"), newIdentNode(targetType))
+        fieldDefs.add(newIdentDefs(newIdentNode(assocName), seqType))
+        constructorAssignments.add(
+          nnkAsgn.newTree(
+            nnkDotExpr.newTree(newIdentNode("result"), newIdentNode(assocName)),
+            newCall(newIdentNode("@"), newTree(nnkBracket))
+          )
+        )
+
+        assocMetaNodes.add(nnkObjConstr.newTree(
+          newIdentNode("AssocMeta"),
+          nnkExprColonExpr.newTree(newIdentNode("name"), newLit(assocName)),
+          nnkExprColonExpr.newTree(newIdentNode("kind"), newIdentNode("akManyToMany")),
+          nnkExprColonExpr.newTree(newIdentNode("targetSchema"), newLit(targetType)),
+          nnkExprColonExpr.newTree(newIdentNode("foreignKey"), newLit("")),
+          nnkExprColonExpr.newTree(newIdentNode("ownerKey"), newLit("id")),
+          nnkExprColonExpr.newTree(newIdentNode("joinTable"), newLit(joinTable))
+        ))
+
+      elif cmdName == "embeds_one":
+        ## AST: Command(Ident "embeds_one", Ident "fieldName", StmtList(Ident "TypeName"))
+        let fieldName = $child[1]
+        var innerType = ""
+        if child.len >= 3 and child[2].len >= 1:
+          innerType = $child[2][0]
+        let jsonbType = newTree(nnkBracketExpr, newIdentNode("JsonB"), newIdentNode(innerType))
+        fieldDefs.add(newIdentDefs(newIdentNode(fieldName), jsonbType))
+        constructorAssignments.add(
+          nnkAsgn.newTree(
+            nnkDotExpr.newTree(newIdentNode("result"), newIdentNode(fieldName)),
+            newCall(jsonbType)
+          )
+        )
+        let idx = fieldMetaNodes.len
+        fieldMetaNodes.add(nnkObjConstr.newTree(
+          newIdentNode("FieldMeta"),
+          nnkExprColonExpr.newTree(newIdentNode("name"), newLit(fieldName)),
+          nnkExprColonExpr.newTree(newIdentNode("dbColumn"), newLit(fieldName)),
+          nnkExprColonExpr.newTree(newIdentNode("nimType"), newLit("JsonB[" & innerType & "]")),
+          nnkExprColonExpr.newTree(newIdentNode("dbType"), newLit("jsonb")),
+          nnkExprColonExpr.newTree(newIdentNode("primaryKey"), newLit(false)),
+          nnkExprColonExpr.newTree(newIdentNode("autoIncrement"), newLit(false)),
+          nnkExprColonExpr.newTree(newIdentNode("nullable"), newLit(true)),
+          nnkExprColonExpr.newTree(newIdentNode("unique"), newLit(false)),
+          nnkExprColonExpr.newTree(newIdentNode("virtual"), newLit(false)),
+          nnkExprColonExpr.newTree(newIdentNode("isTimestamp"), newLit(false)),
+          nnkExprColonExpr.newTree(newIdentNode("defaultValue"), newLit(""))
+        ))
+        let fieldNameIdent = newIdentNode(fieldName)
+        let innerTypeIdent = newIdentNode(innerType)
+        rowLoadAssignments.add(quote do:
+          result.`fieldNameIdent` = loadValue(row[`idx`], JsonB[`innerTypeIdent`])
+        )
+
+      elif cmdName == "embeds_many":
+        ## AST: Command(Ident "embeds_many", Ident "fieldName", StmtList(Ident "TypeName"))
+        let fieldName = $child[1]
+        var innerType = ""
+        if child.len >= 3 and child[2].len >= 1:
+          innerType = $child[2][0]
+        let seqJsonbType = newTree(nnkBracketExpr, newIdentNode("JsonB"),
+          newTree(nnkBracketExpr, newIdentNode("seq"), newIdentNode(innerType)))
+        fieldDefs.add(newIdentDefs(newIdentNode(fieldName), seqJsonbType))
+        constructorAssignments.add(
+          nnkAsgn.newTree(
+            nnkDotExpr.newTree(newIdentNode("result"), newIdentNode(fieldName)),
+            newCall(seqJsonbType)
+          )
+        )
+        let idx = fieldMetaNodes.len
+        fieldMetaNodes.add(nnkObjConstr.newTree(
+          newIdentNode("FieldMeta"),
+          nnkExprColonExpr.newTree(newIdentNode("name"), newLit(fieldName)),
+          nnkExprColonExpr.newTree(newIdentNode("dbColumn"), newLit(fieldName)),
+          nnkExprColonExpr.newTree(newIdentNode("nimType"), newLit("JsonB[seq[" & innerType & "]]"))
+          ,
+          nnkExprColonExpr.newTree(newIdentNode("dbType"), newLit("jsonb")),
+          nnkExprColonExpr.newTree(newIdentNode("primaryKey"), newLit(false)),
+          nnkExprColonExpr.newTree(newIdentNode("autoIncrement"), newLit(false)),
+          nnkExprColonExpr.newTree(newIdentNode("nullable"), newLit(true)),
+          nnkExprColonExpr.newTree(newIdentNode("unique"), newLit(false)),
+          nnkExprColonExpr.newTree(newIdentNode("virtual"), newLit(false)),
+          nnkExprColonExpr.newTree(newIdentNode("isTimestamp"), newLit(false)),
+          nnkExprColonExpr.newTree(newIdentNode("defaultValue"), newLit(""))
+        ))
+        let fieldNameIdent2 = newIdentNode(fieldName)
+        let innerTypeIdent2 = newIdentNode(innerType)
+        rowLoadAssignments.add(quote do:
+          result.`fieldNameIdent2` = loadValue(row[`idx`], JsonB[seq[`innerTypeIdent2`]])
+        )
+
       elif cmdName == "verify":
         hasVerify = true
 
@@ -746,6 +858,22 @@ macro necto_schema*(name: untyped, body: untyped): untyped =
           for r in records:
             r.preloaded.add(`assocNameLit`)
         childMap
+    elif kindStr == "akManyToMany":
+      let ownerKeyNode = newIdentNode("id")
+      let assocFieldNode = newIdentNode(assocNameStr)
+      let joinTableLit = am[6][1]  ## joinTable string literal
+      preloadCall = quote do:
+        var childGroups: Table[int64, seq[`childType`]] = initTable[int64, seq[`childType`]]()
+        if records.len == 0 or `assocNameLit` notin records[0].preloaded:
+          childGroups = preloadManyToMany[`typeName`, `childType`](repo, records, `joinTableLit`)
+          for r in records:
+            if childGroups.hasKey(r.`ownerKeyNode`):
+              r.`assocFieldNode` = childGroups[r.`ownerKeyNode`]
+            else:
+              r.`assocFieldNode` = @[]
+          for r in records:
+            r.preloaded.add(`assocNameLit`)
+        childGroups
     else:
       continue
 
