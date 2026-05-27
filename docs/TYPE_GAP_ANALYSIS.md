@@ -104,7 +104,7 @@ PostgreSQL JSONB оператори интегрирани в Query builder:
 - ✅ **Migration locking** — PostgreSQL advisory locks (`pg_advisory_lock`) в `migrate`/`rollback`/`redo`/`reset`
 - **Prepared statement cache** — per-connection кеширане
 - **FTS DSL** — type-safe full-text search
-- **Subqueries / CTEs** — `WITH` clauses и correlated subqueries
+- ✅ **Subqueries / CTEs** — `whereIn`, `whereNotIn`, `whereExists`, `whereNotExists` + `withCte`
 - ✅ **Window functions** — `ROW_NUMBER()`, `RANK()`, `DENSE_RANK()`, `LAG()`, `LEAD()` с `OVER (PARTITION BY ... ORDER BY ...)`
 
 ### Фаза 4: Ecosystem
