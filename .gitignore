@@ -60,3 +60,4 @@ tests/t_many_to_many
 tests/t_migration_change
 tests/t_multi
 tests/t_zero_copy_arrays
+test_jsonb_macro

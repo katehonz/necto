@@ -612,6 +612,57 @@ macro whereIt*(q: typed, expr: untyped): untyped =
     chain = generateWhereCall(c, chain)
   result.add(chain)
 
+# --- JSONB type-safe where macro ---
+
+proc extractJsonbPath(expr: NimNode): tuple[rootField: string, path: seq[string], op: string, value: NimNode] {.compileTime.} =
+  ## Извлича JSONB път от израз като `profile.settings.theme == "dark"`.
+  if expr.kind != nnkInfix:
+    error("whereJsonbIt expects an infix expression like profile.settings.theme == 'dark'")
+  result.op = $expr[0]
+  result.value = expr[2]
+  var pathExpr = expr[1]
+  var path: seq[string] = @[]
+  while pathExpr.kind == nnkDotExpr:
+    path.insert($pathExpr[1], 0)
+    pathExpr = pathExpr[0]
+  if pathExpr.kind == nnkIdent:
+    path.insert($pathExpr, 0)
+  else:
+    error("Invalid JSONB path expression: expected dot-access like profile.settings.theme")
+  if path.len < 2:
+    error("JSONB path must have at least one nested field, got: " & path.join("."))
+  result.rootField = path[0]
+  result.path = path[1..^1]
+
+macro whereJsonbIt*(q: typed, expr: untyped): untyped =
+  ## Type-safe JSONB path where.
+  ## Пример: `q.whereJsonbIt(profile.settings.theme == "dark")`
+  ## Генерира: `q.whereRawField(jsonbPathText("profile", ["settings","theme"]), Eq, "dark")`
+  let qType = q.getTypeInst()
+  var schemaType: NimNode
+  if qType.kind == nnkBracketExpr and qType[0].strVal == "Query":
+    schemaType = qType[1]
+  else:
+    error("whereJsonbIt expects a Query[T], got: " & qType.repr)
+
+  let (rootField, path, opStr, valueNode) = extractJsonbPath(expr)
+  let opNode = nimOpToWhereOp(opStr)
+
+  let rootFieldLit = newLit(rootField)
+  let pathLit = newLit(path)
+
+  # Build the value expression
+  let valExp = if valueNode.kind in {nnkStrLit, nnkRStrLit}:
+    valueNode
+  else:
+    newCall(newIdentNode("$"), valueNode)
+
+  let whereCall = quote do:
+    `q`.whereRawField(jsonbPathText(`rootFieldLit`, `pathLit`), `opNode`, `valExp`)
+
+  result = newStmtList()
+  result.add(whereCall)
+
 # --- Compiled Query Cache (Nim Superpower) ---
 
 proc compileQuery*[T](q: Query[T]): BoundQuery =

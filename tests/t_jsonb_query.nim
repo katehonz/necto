@@ -189,6 +189,23 @@ suite "JSONB query operators":
     check(results.len == 1)
     check(results[0].name == "Ivan")
 
+  test "whereJsonbIt macro generates correct SQL":
+    var cs1 = newChangeset(newJsonbUser(), {
+      "name": "MacroUser",
+      "settings": """{"theme": "dark", "notifications": true}"""
+    }.toTable)
+    cs1 = cs1.castFields(@["name", "settings"])
+    discard testrepoInstance.insert(cs1)
+
+    let q = fromSchema(JsonbUser).whereJsonbIt(settings.theme == "dark")
+    let bq = q.toBoundQuery()
+    check("\"settings\" #>> '{theme}'" in bq.sql)
+    check("= $1" in bq.sql)
+
+    let results = testrepoInstance.all(q)
+    check(results.len == 1)
+    check(results[0].name == "MacroUser")
+
   test "fragment placeholders are correctly renumbered":
     var cs1 = newChangeset(newJsonbUser(), {
       "name": "X",
