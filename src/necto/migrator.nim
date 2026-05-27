@@ -32,32 +32,42 @@ proc newMigrator*(repo: Repo, migrationsTable: string = "necto_schema_migrations
 
 proc bootstrap*(mig: Migrator) =
   ## Създава таблицата за миграции ако не съществува.
+  ## Добавя checksum колона ако липсва (backward compatibility).
   mig.repo.exec("""
     CREATE TABLE IF NOT EXISTS """ & "\"" & mig.migrationsTable & "\"" & """ (
       version TEXT PRIMARY KEY,
       name TEXT NOT NULL,
+      checksum TEXT,
       inserted_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
     )
   """)
+  # Добавяме checksum колона ако таблицата е от стара версия
+  try:
+    mig.repo.exec("ALTER TABLE \"" & mig.migrationsTable & "\" ADD COLUMN IF NOT EXISTS checksum TEXT")
+  except DatabaseError:
+    discard
 
 # --- DB queries ---
 
-proc appliedMigrations*(mig: Migrator): seq[(string, string)] =
+proc appliedMigrations*(mig: Migrator): seq[(string, string, string)] =
   ## Връща списък с приложените миграции от БД.
+  ## Tuple: (version, name, checksum)
   let rows = mig.repo.queryRaw(
-    "SELECT version, name FROM \"" & mig.migrationsTable &
+    "SELECT version, name, COALESCE(checksum, '') FROM \"" & mig.migrationsTable &
     "\" ORDER BY version ASC"
   )
   for row in rows:
-    if row.len >= 2:
-      result.add((row[0], row[1]))
+    if row.len >= 3:
+      result.add((row[0], row[1], row[2]))
+    elif row.len >= 2:
+      result.add((row[0], row[1], ""))
 
-proc recordMigration*(mig: Migrator, version, name: string) =
+proc recordMigration*(mig: Migrator, version, name, checksum: string) =
   ## Записва миграция като приложена.
   mig.repo.exec(
     "INSERT INTO \"" & mig.migrationsTable &
-    "\" (version, name) VALUES ($1, $2)",
-    @[version, name]
+    "\" (version, name, checksum) VALUES ($1, $2, $3)",
+    @[version, name, checksum]
   )
 
 proc removeMigration*(mig: Migrator, version: string) =
@@ -78,7 +88,7 @@ proc pendingMigrations*(mig: Migrator): seq[MigrationEntry] =
     if entry.version notin appliedVersions:
       result.add(entry)
 
-proc lastApplied*(mig: Migrator): seq[(string, string)] =
+proc lastApplied*(mig: Migrator): seq[(string, string, string)] =
   ## Връща последните N приложени миграции (за rollback).
   let all = mig.appliedMigrations()
   result = all
@@ -106,11 +116,12 @@ proc migrate*(mig: Migrator, steps: int = 0): int =
     let migration = entry.factory()
     let ver = entry.version
     let nm = entry.name
+    let cs = entry.checksum
     echo "  → ", ver, " ", nm
 
     mig.repo.transaction proc() =
       migration.up(mig.repo)
-      mig.recordMigration(ver, nm)
+      mig.recordMigration(ver, nm, cs)
 
     echo "    ✓ applied"
 
@@ -119,6 +130,8 @@ proc migrate*(mig: Migrator, steps: int = 0): int =
 
 proc rollback*(mig: Migrator, steps: int = 1): int =
   ## Отменя последните N миграции.
+  ## Валидация на checksum — ако миграцията е променена след прилагане,
+  ## rollback се прекратява с грешка за сигурност.
   ##
   ## Връща броя отменени миграции.
   let applied = mig.appliedMigrations()
@@ -126,7 +139,7 @@ proc rollback*(mig: Migrator, steps: int = 1): int =
     echo "No migrations to rollback."
     return 0
 
-  var toRollback: seq[(string, string)]
+  var toRollback: seq[(string, string, string)]
   if steps >= applied.len:
     toRollback = applied
   else:
@@ -135,17 +148,27 @@ proc rollback*(mig: Migrator, steps: int = 1): int =
   toRollback.reverse()  # от най-новата към най-старата
 
   echo "Rolling back ", toRollback.len, " migration(s)..."
-  for (version, name) in toRollback:
+  for (version, name, dbChecksum) in toRollback:
     # Намираме миграцията по version
     var migration: Migration = nil
+    var registeredChecksum = ""
     for entry in allMigrations():
       if entry.version == version:
         migration = entry.factory()
+        registeredChecksum = entry.checksum
         break
 
     if migration == nil:
       echo "  ⚠ Migration ", version, " not found in registry, skipping."
       continue
+
+    # Checksum validation
+    if dbChecksum.len > 0 and registeredChecksum.len > 0 and dbChecksum != registeredChecksum:
+      raise newException(MigrationError,
+        "Checksum mismatch for migration " & version & 
+        ": the migration file has been modified since it was applied. " &
+        "Rollback aborted for safety. Expected: " & dbChecksum & 
+        ", got: " & registeredChecksum)
 
     let v = version
     let n = name
@@ -182,7 +205,8 @@ proc status*(mig: Migrator) =
 
   for entry in allMigrations():
     let status = if entry.version in appliedVersions: "✓ applied" else: "• pending"
-    echo "  ", entry.version, "  ", entry.name, "  [", status, "]"
+    let csIndicator = if entry.checksum.len > 0: " 🔒" else: ""
+    echo "  ", entry.version, "  ", entry.name, "  [", status, "]", csIndicator
 
 proc reset*(mig: Migrator) =
   ## Rollback всички миграции (опасно! за dev/test).

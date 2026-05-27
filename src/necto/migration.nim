@@ -12,7 +12,7 @@
 ##     down:
 ##       dropTable repo, "users"
 
-import std/[macros, strutils, tables, sequtils, algorithm]
+import std/[macros, strutils, tables, sequtils, algorithm, md5]
 import ./adapters/base
 import ./repo
 import ./errors
@@ -32,6 +32,7 @@ type
   MigrationEntry* = tuple
     version: string
     name: string
+    checksum: string
     factory: proc(): Migration
 
   ColumnDef* = object
@@ -47,8 +48,8 @@ type
 
 var registeredMigrations*: seq[MigrationEntry] = @[]
 
-proc registerMigration*(version: string, name: string, factory: proc(): Migration) =
-  registeredMigrations.add((version, name, factory))
+proc registerMigration*(version: string, name: string, checksum: string, factory: proc(): Migration) =
+  registeredMigrations.add((version, name, checksum, factory))
 
 proc allMigrations*(): seq[MigrationEntry] =
   result = registeredMigrations
@@ -306,7 +307,12 @@ macro necto_migration*(name: untyped, version: static[string], body: untyped): u
     procType = nnkMethodDef
   ))
 
-  # registerMigration(version, name, proc(): Migration = newTypeName())
+  # Compute checksum from up/down body repr
+  let upRepr = if upBody.kind != nnkEmpty: upBody.repr else: ""
+  let downRepr = if downBody.kind != nnkEmpty: downBody.repr else: ""
+  let checksum = getMD5(upRepr & "::" & downRepr)
+
+  # registerMigration(version, name, checksum, proc(): Migration = newTypeName())
   var lambdaBody = newStmtList()
   lambdaBody.add(nnkAsgn.newTree(
     newIdentNode("result"),
@@ -317,6 +323,7 @@ macro necto_migration*(name: untyped, version: static[string], body: untyped): u
     newIdentNode("registerMigration"),
     newLit(version),
     newLit(typeNameStr),
+    newLit(checksum),
     newTree(nnkLambda,
       newEmptyNode(),
       newEmptyNode(),
