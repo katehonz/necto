@@ -237,6 +237,39 @@ let q = fromSchema(Order)
   .innerJoin("active_users", "orders.user_id = active_users.id")
 ```
 
+## Full-Text Search (FTS)
+
+PostgreSQL `tsvector` / `tsquery` support via SQL fragments and Query builder methods.
+
+### Query builders
+
+```nim
+let q = fromSchema(Article)
+  .whereTsVectorMatches("search_vector", plaintoTsQuery("simple", "nim orm"))
+  .orderByTsRank("search_vector", plaintoTsQuery("simple", "nim orm"), Desc)
+  .limit(10)
+```
+
+Available query functions:
+- `whereTsVectorMatches(field, tsq)` — `WHERE field @@ tsq`
+- `orWhereTsVectorMatches(field, tsq)` — `OR WHERE field @@ tsq`
+- `orderByTsRank(field, tsq, dir)` — `ORDER BY ts_rank(field, tsq)`
+- `orderByTsRankCd(field, tsq, dir)` — `ORDER BY ts_rank_cd(field, tsq)`
+
+### SQL Fragments
+
+| Template | Generates |
+|----------|-----------|
+| `toTsVector("simple", "title")` | `to_tsvector('simple', "title")` |
+| `plaintoTsQuery("simple", "nim orm")` | `plainto_tsquery('simple', $1)` |
+| `phrasetoTsQuery("simple", "nim orm")` | `phraseto_tsquery('simple', $1)` |
+| `websearchToTsQuery("simple", "nim -python")` | `websearch_to_tsquery('simple', $1)` |
+| `toTsQuery("simple", "nim & tutorial")` | `to_tsquery('simple', $1)` |
+| `tsRank(field, tsq)` | `ts_rank(field, tsq)` |
+| `tsRankCd(field, tsq)` | `ts_rank_cd(field, tsq)` |
+
+All fragments support parameter binding — values never leak into SQL strings.
+
 ## SQL Injection Safety
 
 Necto never interpolates values into SQL strings. All values are passed as `$N` placeholders via `pqexecParams` / `pqexecPrepared`:

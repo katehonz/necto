@@ -142,6 +142,14 @@ let sq = fromSchema(Order).select("user_id").where("total", Gt, "100").subquery(
 let bigSpenders = repo.all(
   fromSchema(User).whereIn("id", sq)
 )
+
+# Full-Text Search
+let articles = repo.all(
+  fromSchema(Article)
+    .whereTsVectorMatches("search_vector", plaintoTsQuery("simple", "nim orm"))
+    .orderByTsRank("search_vector", plaintoTsQuery("simple", "nim orm"), Desc)
+    .limit(10)
+)
 ```
 
 ### 4. Insert / Update / Delete

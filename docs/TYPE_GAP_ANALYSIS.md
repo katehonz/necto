@@ -103,7 +103,7 @@ PostgreSQL JSONB оператори интегрирани в Query builder:
 - ✅ **Streaming** (`repo.stream` / `forStream`) — cursor-based streaming с `DECLARE CURSOR` + `FETCH FORWARD`
 - ✅ **Migration locking** — PostgreSQL advisory locks (`pg_advisory_lock`) в `migrate`/`rollback`/`redo`/`reset`
 - **Prepared statement cache** — per-connection кеширане
-- **FTS DSL** — type-safe full-text search
+- ✅ **FTS DSL** — type-safe full-text search (`whereTsVectorMatches`, `orderByTsRank`, `plaintoTsQuery`, `websearchToTsQuery`, etc.)
 - ✅ **Subqueries / CTEs** — `whereIn`, `whereNotIn`, `whereExists`, `whereNotExists` + `withCte`
 - ✅ **Window functions** — `ROW_NUMBER()`, `RANK()`, `DENSE_RANK()`, `LAG()`, `LEAD()` с `OVER (PARTITION BY ... ORDER BY ...)`
 

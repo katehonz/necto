@@ -32,6 +32,8 @@ type
   OrderClause* = object
     field*: string
     dir*: OrderDirection
+    fragmentArgs*: seq[string]  ## args for raw SQL expressions
+    isRawField*: bool  ## If true, field is used directly without quoting
 
   JoinClause* = object
     joinType*: string     # "INNER", "LEFT"
@@ -114,6 +116,15 @@ proc orWhere*[T](q: Query[T], field: string, op: WhereOp, value: string): Query[
 proc orderBy*[T](q: Query[T], field: string, dir: OrderDirection = Asc): Query[T] =
   result = q
   result.orderClauses.add(OrderClause(field: field, dir: dir))
+
+proc orderByRaw*[T](q: Query[T], fieldExpr: string, args: varargs[string],
+                    dir: OrderDirection = Asc): Query[T] =
+  ## ORDER BY с raw SQL израз и parameter binding.
+  ## Полезно за ts_rank, window functions и др.
+  result = q
+  result.orderClauses.add(OrderClause(
+    field: fieldExpr, dir: dir, fragmentArgs: @args, isRawField: true
+  ))
 
 proc limit*[T](q: Query[T], n: int): Query[T] =
   result = q
@@ -420,6 +431,78 @@ proc whereNotExists*[T](q: Query[T], sq: SubQuery[auto]): Query[T] =
     isRawField: true
   ))
 
+# --- FTS (Full-Text Search) helpers ---
+
+template toTsVector*(lang: string, field: string): string =
+  ## SQL fragment: to_tsvector('lang', "field")
+  "to_tsvector('" & lang & "', \"" & field & "\")"
+
+template plaintoTsQuery*(lang: string, query: string): SqlFragment =
+  ## SQL fragment: plainto_tsquery('lang', $1)
+  fragment("plainto_tsquery('" & lang & "', $1)", query)
+
+template phrasetoTsQuery*(lang: string, query: string): SqlFragment =
+  ## SQL fragment: phraseto_tsquery('lang', $1)
+  fragment("phraseto_tsquery('" & lang & "', $1)", query)
+
+template websearchToTsQuery*(lang: string, query: string): SqlFragment =
+  ## SQL fragment: websearch_to_tsquery('lang', $1)
+  fragment("websearch_to_tsquery('" & lang & "', $1)", query)
+
+template toTsQuery*(lang: string, query: string): SqlFragment =
+  ## SQL fragment: to_tsquery('lang', $1)
+  fragment("to_tsquery('" & lang & "', $1)", query)
+
+proc whereTsVectorMatches*[T](q: Query[T], field: string, tsq: SqlFragment;
+                               conjunction: string = "AND"): Query[T] =
+  ## WHERE "field" @@ tsquery — full-text match.
+  ## Пример: q.whereTsVectorMatches("search_vector", plaintoTsQuery("simple", "nim orm"))
+  result = q
+  let qf = if field.contains("("): field else: "\"" & field & "\""
+  result.whereClauses.add(WhereClause(
+    field: qf & " @@ " & tsq.sql,
+    op: Raw,
+    value: "",
+    conjunction: conjunction,
+    fragmentArgs: tsq.args,
+    isRawField: true
+  ))
+
+proc orWhereTsVectorMatches*[T](q: Query[T], field: string, tsq: SqlFragment): Query[T] =
+  ## OR WHERE "field" @@ tsquery.
+  result = q.whereTsVectorMatches(field, tsq, "OR")
+
+template tsRank*(fieldExpr: string, tsq: SqlFragment): SqlFragment =
+  ## SQL fragment: ts_rank(field, tsquery)
+  fragment("ts_rank(" & fieldExpr & ", " & tsq.sql & ")", tsq.args)
+
+template tsRankCd*(fieldExpr: string, tsq: SqlFragment): SqlFragment =
+  ## SQL fragment: ts_rank_cd(field, tsquery)
+  fragment("ts_rank_cd(" & fieldExpr & ", " & tsq.sql & ")", tsq.args)
+
+proc orderByTsRank*[T](q: Query[T], field: string, tsq: SqlFragment,
+                       dir: OrderDirection = Desc): Query[T] =
+  ## ORDER BY ts_rank("field", tsquery) DIR.
+  ## Ползва orderByRaw за parameter binding.
+  ## Ако field е text колона, ползвайте toTsVector() ръчно:
+  ##   q.orderByTsRank(toTsVector("simple", "content"), plaintoTsQuery(...))
+  result = q
+  let qf = if field.contains("("): field else: "\"" & field & "\""
+  let frag = tsRank(qf, tsq)
+  result.orderClauses.add(OrderClause(
+    field: frag.sql, dir: dir, fragmentArgs: frag.args, isRawField: true
+  ))
+
+proc orderByTsRankCd*[T](q: Query[T], field: string, tsq: SqlFragment,
+                         dir: OrderDirection = Desc): Query[T] =
+  ## ORDER BY ts_rank_cd("field", tsquery) DIR.
+  result = q
+  let qf = if field.contains("("): field else: "\"" & field & "\""
+  let frag = tsRankCd(qf, tsq)
+  result.orderClauses.add(OrderClause(
+    field: frag.sql, dir: dir, fragmentArgs: frag.args, isRawField: true
+  ))
+
 # --- SQL Генерация с parameter binding ---
 
 template toBoundQuery*[T](q: Query[T]): BoundQuery =
@@ -571,7 +654,18 @@ template toBoundQuery*[T](q: Query[T]): BoundQuery =
     var orders: seq[string] = @[]
     for o in q.orderClauses:
       let dirStr = if o.dir == Asc: "ASC" else: "DESC"
-      orders.add("\"" & o.field & "\" " & dirStr)
+      if o.isRawField and o.fragmentArgs.len > 0:
+        var fragSql = o.field
+        for i in countdown(o.fragmentArgs.len, 1):
+          fragSql = fragSql.replace("$" & $i, "$" & $(idx + i - 1))
+        for arg in o.fragmentArgs:
+          args.add(arg)
+          inc idx
+        orders.add(fragSql & " " & dirStr)
+      elif o.isRawField:
+        orders.add(o.field & " " & dirStr)
+      else:
+        orders.add("\"" & o.field & "\" " & dirStr)
     parts.add(orders.join(", "))
 
   # Group By
