@@ -19,7 +19,7 @@ type
     Asc, Desc
 
   WhereOp* = enum
-    Eq, Ne, Gt, Gte, Lt, Lte, Like, Ilike, In, IsNull, NotNull
+    Eq, Ne, Gt, Gte, Lt, Lte, Like, Ilike, In, IsNull, NotNull, Raw
 
   WhereClause* = object
     field*: string
@@ -63,6 +63,7 @@ type
     op*: WhereOp
     value*: string
     conjunction*: string  ## "AND" | "OR"
+    fragmentArgs*: seq[string]  ## args from SqlFragment
     isRawField*: bool  ## Ако true, `field` се използва директно без кавички.
 
   Query*[T] = object
@@ -96,7 +97,10 @@ proc fromSchema*[T](typ: typedesc[T]): Query[T] =
 
 proc select*[T](q: Query[T], fields: varargs[string]): Query[T] =
   result = q
-  result.selectFields = @fields
+  result.selectFields = @[]
+  for f in fields:
+    let qf = if f.contains(".") or f.contains("(") or f.contains("#") or f.contains("@") or f.contains("?"): f else: "\"" & f & "\""
+    result.selectFields.add(qf)
 
 proc where*[T](q: Query[T], field: string, op: WhereOp, value: string): Query[T] =
   result = q
@@ -260,7 +264,7 @@ proc groupBy*[T](q: Query[T], fields: varargs[string]): Query[T] =
 proc having*[T](q: Query[T], field: string, op: WhereOp, value: string; conjunction: string = "AND"): Query[T] =
   ## Добавя HAVING условие.
   result = q
-  result.havingClauses.add(HavingClause(field: field, op: op, value: value, conjunction: conjunction))
+  result.havingClauses.add(HavingClause(field: field, op: op, value: value, conjunction: conjunction, fragmentArgs: @[]))
 
 # --- Raw SQL фрагменти ---
 
@@ -355,6 +359,66 @@ proc whereJsonbHasAllKeys*[T](q: Query[T], field: string, keys: openArray[string
 proc subquery*[T](q: Query[T]): SubQuery[T] =
   ## Обръща Query в SubQuery за IN/EXISTS.
   SubQuery[T](query: q)
+
+template toSubqueryFragment*[T](sq: SubQuery[T]): SqlFragment =
+  ## Превръща SubQuery в SqlFragment за вграждане в WHERE/HAVING.
+  ## Placeholders се преномерират автоматично от toBoundQuery.
+  let bq = sq.query.toBoundQuery()
+  fragment("(" & bq.sql & ")", bq.args)
+
+# --- Subquery WHERE helpers ---
+
+proc whereIn*[T](q: Query[T], field: string, sq: SubQuery[auto]): Query[T] =
+  ## WHERE field IN (subquery).
+  result = q
+  let frag = sq.toSubqueryFragment()
+  result.whereClauses.add(WhereClause(
+    field: "\"" & field & "\" IN " & frag.sql,
+    op: Raw,
+    value: "",
+    conjunction: "AND",
+    fragmentArgs: frag.args,
+    isRawField: true
+  ))
+
+proc whereNotIn*[T](q: Query[T], field: string, sq: SubQuery[auto]): Query[T] =
+  ## WHERE field NOT IN (subquery).
+  result = q
+  let frag = sq.toSubqueryFragment()
+  result.whereClauses.add(WhereClause(
+    field: "\"" & field & "\" NOT IN " & frag.sql,
+    op: Raw,
+    value: "",
+    conjunction: "AND",
+    fragmentArgs: frag.args,
+    isRawField: true
+  ))
+
+proc whereExists*[T](q: Query[T], sq: SubQuery[auto]): Query[T] =
+  ## WHERE EXISTS (subquery).
+  result = q
+  let frag = sq.toSubqueryFragment()
+  result.whereClauses.add(WhereClause(
+    field: "EXISTS " & frag.sql,
+    op: Raw,
+    value: "",
+    conjunction: "AND",
+    fragmentArgs: frag.args,
+    isRawField: true
+  ))
+
+proc whereNotExists*[T](q: Query[T], sq: SubQuery[auto]): Query[T] =
+  ## WHERE NOT EXISTS (subquery).
+  result = q
+  let frag = sq.toSubqueryFragment()
+  result.whereClauses.add(WhereClause(
+    field: "NOT EXISTS " & frag.sql,
+    op: Raw,
+    value: "",
+    conjunction: "AND",
+    fragmentArgs: frag.args,
+    isRawField: true
+  ))
 
 # --- SQL Генерация с parameter binding ---
 
@@ -451,12 +515,21 @@ template toBoundQuery*[T](q: Query[T]): BoundQuery =
           wheres.add(w.field & " IS NULL")
         of NotNull:
           wheres.add(w.field & " IS NOT NULL")
+        of Raw:
+          var fragSql = w.field
+          for i in countdown(w.fragmentArgs.len, 1):
+            fragSql = fragSql.replace("$" & $i, "$" & $(idx + i - 1))
+          for arg in w.fragmentArgs:
+            args.add(arg)
+            inc idx
+          wheres.add(fragSql)
       elif w.fragmentArgs.len > 0:
         # Фрагмент с placeholders — преномерираме $1, $2 …
         var fragSql = w.field
-        for i in 1..w.fragmentArgs.len:
-          fragSql = fragSql.replace("$" & $i, "$" & $idx)
-          args.add(w.fragmentArgs[i-1])
+        for i in countdown(w.fragmentArgs.len, 1):
+          fragSql = fragSql.replace("$" & $i, "$" & $(idx + i - 1))
+        for arg in w.fragmentArgs:
+          args.add(arg)
           inc idx
         wheres.add(fragSql)
       else:
@@ -484,6 +557,13 @@ template toBoundQuery*[T](q: Query[T]): BoundQuery =
           wheres.add(qf & " IS NULL")
         of NotNull:
           wheres.add(qf & " IS NOT NULL")
+        of Raw:
+          var fragSql = w.field
+          for i in countdown(w.fragmentArgs.len, 1):
+            fragSql = fragSql.replace("$" & $i, "$" & $idx)
+            args.add(w.fragmentArgs[i-1])
+            inc idx
+          wheres.add(fragSql)
     parts.add(wheres.join(" "))
 
   if q.orderClauses.len > 0:
@@ -528,6 +608,14 @@ template toBoundQuery*[T](q: Query[T]): BoundQuery =
         havings.add(qf & " IS NULL")
       of NotNull:
         havings.add(qf & " IS NOT NULL")
+      of Raw:
+        var fragSql = h.field
+        for i in countdown(h.fragmentArgs.len, 1):
+          fragSql = fragSql.replace("$" & $i, "$" & $(idx + i - 1))
+        for arg in h.fragmentArgs:
+          args.add(arg)
+          inc idx
+        havings.add(fragSql)
     var havingParts: seq[string] = @[]
     for i, h in havings:
       if i > 0:

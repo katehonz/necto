@@ -182,6 +182,61 @@ let adults = User
 
 The `|>` macro simply inserts the left-hand side as the first argument of the right-hand call.
 
+## Subqueries
+
+Subqueries work via `.subquery()` which wraps a `Query` into a `SubQuery[T]`. Placeholders are automatically renumbered when embedded in the outer query.
+
+### whereIn / whereNotIn
+
+```nim
+let sq = fromSchema(Order).select("user_id").where("total", Gt, "100").subquery()
+let users = repo.all(
+  fromSchema(User).whereIn("id", sq)
+)
+# SELECT * FROM "users" WHERE "id" IN (SELECT "user_id" FROM "orders" WHERE "total" > $1)
+```
+
+```nim
+let sq = fromSchema(Order).select("user_id").subquery()
+let users = repo.all(
+  fromSchema(User).whereNotIn("id", sq)
+)
+# Users with no orders
+```
+
+### whereExists / whereNotExists
+
+```nim
+let sq = fromSchema(Order).where("total", Gt, "100").subquery()
+let users = repo.all(
+  fromSchema(User).whereExists(sq)
+)
+```
+
+### Multiple subqueries
+
+You can use as many subqueries as you want — placeholders are renumbered automatically:
+
+```nim
+let sq1 = fromSchema(Order).where("total", Gt, "100").subquery()
+let sq2 = fromSchema(Order).where("status", Eq, "shipped").subquery()
+let q = fromSchema(User)
+  .whereIn("id", sq1)
+  .whereIn("id", sq2)
+# $1 = 100, $2 = "shipped"
+```
+
+## CTEs (Common Table Expressions)
+
+Chain `.withCte()` to add `WITH` clauses. Multiple CTEs are supported.
+
+```nim
+let cteQ = fromSchema(User).where("active", Eq, "true")
+let q = fromSchema(Order)
+  .withCte("active_users", cteQ)
+  .innerJoin("active_users", "orders.user_id = active_users.id")
+```
+
 ## SQL Injection Safety
 
 Necto never interpolates values into SQL strings. All values are passed as `$N` placeholders via `pqexecParams` / `pqexecPrepared`:

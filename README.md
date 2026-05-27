@@ -30,6 +30,8 @@ The Crystal community built **Avram** — an Ecto-like ORM that made the languag
 |---------|-------|------|--------------|
 | Repository Pattern | ✅ | ⚠️ | ❌ |
 | Composable queries | ✅ | ❌ | ⚠️ |
+| Subqueries (IN, EXISTS) | ✅ | ❌ | ✅ |
+| CTEs (WITH) | ✅ | ❌ | ✅ |
 | Changeset validations | ✅ | ❌ | ⚠️ |
 | Type-safe preload | ✅ | ❌ | ❌ |
 | Auto-preload macros | ✅ | ❌ | ❌ |
@@ -134,6 +136,12 @@ let maybe = repo.one(fromSchema(User).where("email", Eq, "ivan@test.com"))
 
 # Count
 let count = repo.count(fromSchema(User).where("active", Eq, "true"))
+
+# Subqueries (IN / EXISTS)
+let sq = fromSchema(Order).select("user_id").where("total", Gt, "100").subquery()
+let bigSpenders = repo.all(
+  fromSchema(User).whereIn("id", sq)
+)
 ```
 
 ### 4. Insert / Update / Delete

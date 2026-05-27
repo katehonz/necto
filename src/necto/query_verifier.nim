@@ -17,20 +17,26 @@ import ./schema
 
 # --- Column extraction from Query ---
 
+proc stripQuotes(s: string): string =
+  if s.len >= 2 and s[0] == '"' and s[^1] == '"':
+    s[1..^2]
+  else:
+    s
+
 proc extractColumns*[T](q: Query[T]): seq[string] =
   result = @[]
   for s in q.selectFields:
-    if s != "*": result.add(s)
+    if s != "*": result.add(stripQuotes(s))
   for w in q.whereClauses:
-    result.add(w.field)
+    result.add(stripQuotes(w.field))
   for o in q.orderClauses:
-    result.add(o.field)
+    result.add(stripQuotes(o.field))
   for a in q.aggregates:
-    if a.field != "*": result.add(a.field)
+    if a.field != "*": result.add(stripQuotes(a.field))
   for g in q.groupByFields:
-    result.add(g)
+    result.add(stripQuotes(g))
   for h in q.havingClauses:
-    result.add(h.field)
+    result.add(stripQuotes(h.field))
 
 # --- Verification result types ---
 
