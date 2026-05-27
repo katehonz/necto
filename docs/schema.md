@@ -27,6 +27,7 @@ necto_schema User:
 | `getFieldVal` | `template` | Compile-time field access |
 | `setFieldVal` | `template` | Compile-time field assignment |
 | `getFieldValRuntime` | `proc` | Runtime field access (returns `string`) |
+| `verifyUserSchema()` | `proc` | Schema verification (when `verify` is used) |
 
 ## Field Pragmas
 
@@ -39,16 +40,112 @@ necto_schema User:
 
 ## Supported Types
 
+### Built-in Types
+
+| Nim Type | PostgreSQL Type | Notes |
+|----------|-----------------|-------|
+| `string` | `text` | |
+| `int` | `integer` | 32-bit |
+| `int16` | `smallint` | |
+| `int64` | `bigint` | |
+| `float` | `double precision` | |
+| `bool` | `boolean` | |
+| `DateTime` | `timestamp with time zone` | from `std/times` |
+| `Date` | `date` | custom type, parsed from `yyyy-MM-dd` |
+| `TimeOfDay` | `time without time zone` | custom type, parsed from `HH:mm:ss` |
+| `JsonNode` | `jsonb` | from `std/json` |
+| `Uuid` | `uuid` | `distinct string`, pass-through |
+| `Decimal` | `numeric` | `distinct string`, exact precision |
+| `seq[byte]` | `bytea` | binary data, hex-encoded |
+
+### Generic Wrappers
+
+| Nim Type | PostgreSQL Type | Notes |
+|----------|-----------------|-------|
+| `Option[T]` | same as `T` | nullable column |
+| `seq[T]` | `T[]` | PostgreSQL array |
+| `JsonB[T]` | `jsonb` | **Typed JSONB** — serializes/deserializes to Nim object |
+
+### Enum Types
+
+Nim `enum` types stored as `text` (enum member name):
+
+```nim
+type Status = enum Draft, Published, Archived
+
+necto_schema Article:
+  table "articles"
+  field id: int64 {.primary_key.}
+  field status: Status
+```
+
+### PostgreSQL-specific Types
+
+Import `necto/postgres_types` for these types:
+
+```nim
+import necto/postgres_types
+```
+
 | Nim Type | PostgreSQL Type |
 |----------|-----------------|
-| `string` | `text` |
-| `int` | `integer` |
-| `int64` | `bigint` |
-| `float` | `double precision` |
-| `bool` | `boolean` |
-| `DateTime` | `timestamp with time zone` |
-| `JsonNode` | `jsonb` |
-| `Option[T]` | `T` (nullable) |
+| `PgPoint` | `point` |
+| `PgInet` | `inet` |
+| `PgCidr` | `cidr` |
+| `PgMacAddr` | `macaddr` |
+| `PgTsVector` | `tsvector` |
+| `PgTsQuery` | `tsquery` |
+| `Money` | `bigint` (cents, `distinct int64`) |
+
+### Custom Types
+
+Define your own types by implementing the NectoType interface:
+
+```nim
+type MyMoney = distinct int64
+
+proc dbType*(T: typedesc[MyMoney]): string = "bigint"
+proc loadValue*(val: string, T: typedesc[MyMoney]): MyMoney =
+  MyMoney(parseBiggestInt(val))
+proc dumpValue*(val: MyMoney): string = $int64(val)
+proc castValue*(val: string, T: typedesc[MyMoney]): MyMoney =
+  MyMoney(parseBiggestInt(val))
+
+registerNectoType(MyMoney)  # enables use in necto_schema
+```
+
+See `src/necto/postgres_types.nim` for a complete example (`Money` type).
+
+## Typed JSONB (`JsonB[T]`)
+
+A Necto **superpower** — store JSONB in PostgreSQL but access it as a typed Nim object:
+
+```nim
+type UserSettings = object
+  theme: string
+  notifications: bool
+
+necto_schema User:
+  table "users"
+  field id: int64 {.primary_key, auto_increment.}
+  field name: string
+  field settings: JsonB[UserSettings]
+```
+
+Usage:
+
+```nim
+let user = repo.one(fromSchema(User).where("id", Eq, "1")).get()
+echo user.settings.val.theme        # "dark"
+echo user.settings.val.notifications # true
+
+# Update
+var cs = newChangeset(user, {"settings": """{"theme":"light","notifications":false}"""}.toTable)
+cs = cs.castFields(@["settings"])
+repo.update!(cs)
+```
+
+Under the hood, `JsonB[T]` uses `%` and `to()` from Nim's `std/json` for serialization. PostgreSQL stores the raw JSONB; Necto gives you typed access.
 
 ## Timestamps
 
@@ -64,11 +161,50 @@ necto_schema Post:
 
 Both are `DateTime` and auto-populated on INSERT and UPDATE.
 
+## Schema Verification
+
+Add `verify` to your schema to enable compile-time checks against the real database:
+
+```nim
+necto_schema User:
+  table "users"
+  verify                       # ← checks against live DB
+  field id: int64 {.primary_key, auto_increment.}
+  field email: string {.not_null, unique.}
+  field name: string
+  timestamps
+```
+
+Compile with `-d:nectoVerify` or set `NECTO_VERIFY=1`:
+
+```bash
+NECTO_VERIFY=1 nim c -r my_app.nim
+```
+
+At startup (before any queries), Necto connects to the database and verifies:
+- Table exists
+- All declared columns exist with compatible types
+- NOT NULL constraints match
+- PRIMARY KEY constraint exists
+- UNIQUE constraints exist (warning only)
+
+Mismatches produce clear error messages and stop the program. Warnings are printed but don't abort.
+
+**CI/CD:** Use the standalone `necto_verify` CLI tool:
+
+```bash
+nimble verify -- --table=users \
+  --field=id:int64:bigint:pk:notnull \
+  --field=name:string:text:notnull
+```
+
+See [Schema Verification](./verification.md) for full details.
+
 ## Associations
 
 ### belongs_to
 
-Adds an `fk` column (e.g. `author_id: int64`) and `AssocMeta`:
+Adds an FK column (e.g. `author_id: int64`) and `AssocMeta`:
 
 ```nim
 necto_schema Post:
@@ -139,11 +275,18 @@ close(conn)
 |-----------------|-------------------|
 | `bigint`, `bigserial` | `int64` |
 | `integer`, `serial` | `int` |
+| `smallint` | `int16` |
 | `text`, `varchar` | `string` |
 | `boolean` | `bool` |
 | `double precision` | `float` |
 | `timestamp with time zone` | `DateTime` |
-| `jsonb` | `JsonNode` |
+| `date` | `Date` |
+| `time without time zone` | `TimeOfDay` |
+| `jsonb`, `json` | `JsonNode` |
+| `uuid` | `Uuid` |
+| `numeric`, `decimal` | `Decimal` |
+| `bytea` | `seq[byte]` |
+| `T[]` (array) | `seq[T]` |
 | any nullable column | `Option[T]` |
 
 `bigserial` / `serial` columns are detected automatically and marked with `{primary_key, auto_increment}`.

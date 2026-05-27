@@ -521,6 +521,25 @@ macro whereIt*(q: typed, expr: untyped): untyped =
     chain = generateWhereCall(c, chain)
   result.add(chain)
 
+# --- Compiled Query Cache (Nim Superpower) ---
+
+proc compileQuery*[T](q: Query[T]): BoundQuery =
+  ## Pre-computes a query's SQL. Cache the result in a `let` for repeated use.
+  ## For static queries, this avoids re-computing the SQL string.
+  ##
+  ## Usage:
+  ##   let allUsersQ = compileQuery(fromSchema(User).orderBy("name", Asc))
+  ##   echo allUsersQ.sql   # "SELECT * FROM \"users\" ORDER BY \"name\" ASC"
+  q.toBoundQuery()
+
+proc querySql*[T](q: Query[T]): string =
+  ## Returns just the SQL string with all placeholders resolved to NULL.
+  ## Useful for EXPLAIN verification and debugging.
+  var bq = q.toBoundQuery()
+  for i in 1..30:
+    bq.sql = bq.sql.replace("$" & $i, "NULL")
+  bq.sql
+
 # --- Pipe operator for query pipelining (Elixir-style) ---
 
 macro `|>`*(left: untyped; right: untyped): untyped =

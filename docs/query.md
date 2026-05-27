@@ -44,6 +44,14 @@ Supported operators:
 
 Multiple `where` calls are joined with `AND`.
 
+### orWhere
+
+```nim
+let q = fromSchema(User)
+  .where("active", Eq, "true")
+  .orWhere("role", Eq, "admin")
+```
+
 ### orderBy
 
 ```nim
@@ -62,6 +70,31 @@ let q = fromSchema(User).limit(10).offset(20)
 ```nim
 let q = fromSchema(User).setDistinct()
 ```
+
+### Joins
+
+```nim
+let q = fromSchema(Post)
+  .innerJoin("users", "posts.author_id = users.id")
+  .leftJoin("comments", "posts.id = comments.post_id")
+```
+
+### Aggregates
+
+```nim
+let q = fromSchema(User).count()
+let q2 = fromSchema(Order).sum("amount", "total")
+let q3 = fromSchema(Product).avg("price")
+let q4 = fromSchema(User).groupBy("role").count()
+```
+
+### whereIt — Compile-time field checking
+
+```nim
+let q = fromSchema(User).whereIt(age > 18 and name == "Ivan")
+```
+
+Checks that `age` and `name` are real fields at compile-time. Supports `and`/`or`, `like`, `ilike`, `isNil`, `isNotNil`.
 
 ## Running Queries
 
@@ -88,6 +121,52 @@ let total = repo.count(fromSchema(User))
 let active = repo.count(fromSchema(User).where("active", Eq, "true"))
 ```
 
+## Compiled Query Cache
+
+Pre-compute a query's SQL once and reuse it. Useful for queries executed in hot loops.
+
+### compileQuery
+
+```nim
+let allUsersQ = compileQuery(fromSchema(User).orderBy("name", Asc))
+echo allUsersQ.sql   # "SELECT * FROM \"users\" ORDER BY \"name\" ASC"
+echo allUsersQ.args  # @[]
+```
+
+The result is a `BoundQuery` (SQL + args). Cache it in a `let` and pass to your repo methods.
+
+### querySql
+
+Resolves all `$N` placeholders to `NULL` — useful for EXPLAIN verification and debugging:
+
+```nim
+let sql = querySql(fromSchema(User).where("age", Gt, "18").limit(10))
+echo sql  # "SELECT * FROM \"users\" WHERE \"age\" > NULL LIMIT NULL"
+```
+
+## Query Verification
+
+Validate queries against the database at startup. Catches typos in table/column names before any queries execute.
+
+```nim
+import necto/query_verifier
+
+let q = verifyQuery(User, fromSchema(User).where("age", Gt, "18"))
+```
+
+When compiled with `-d:nectoVerify`:
+- Checks the table exists
+- Checks all referenced columns exist
+- Validates SQL syntax via PostgreSQL `EXPLAIN`
+
+```bash
+NECTO_VERIFY=1 nim c -r my_app.nim
+```
+
+Invalid queries print clear errors and stop the program immediately. When the flag is not set, `verifyQuery` is a zero-overhead pass-through.
+
+See [Schema & Query Verification](./verification.md) for full details.
+
 ## Pipe Operator
 
 Necto supports Elixir-style piping for cleaner query chains:
@@ -101,11 +180,11 @@ let adults = User
   |> repo.all
 ```
 
-The `|>` macro simply inserts the left-hand side as the first argument of the right-hand call, so it works with any Necto API.
+The `|>` macro simply inserts the left-hand side as the first argument of the right-hand call.
 
 ## SQL Injection Safety
 
-Necto never interpolates values into SQL strings. All values are passed as `$N` placeholders via `pqexecParams`:
+Necto never interpolates values into SQL strings. All values are passed as `$N` placeholders via `pqexecParams` / `pqexecPrepared`:
 
 ```nim
 # Generated SQL:

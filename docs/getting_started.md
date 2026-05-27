@@ -178,10 +178,44 @@ let adults = User
   |> repo.all
 ```
 
-## 5. Next Steps
+## 5. Verify Your Schema (optional but recommended)
 
-- [Schema](./schema.md) — fields, types, associations, timestamps, reverse generation
-- [Query DSL](./query.md) — where, orderBy, limit, count, pipe operator
+Add `verify` to catch schema mismatches at startup:
+
+```nim
+necto_schema User:
+  table "users"
+  verify                       # ← enable verification
+  field id: int64 {.primary_key, auto_increment.}
+  field name: string {.not_null.}
+  field email: string {.not_null, unique.}
+  timestamps
+```
+
+Then compile with:
+
+```bash
+NECTO_VERIFY=1 nim c -r src/my_app.nim
+```
+
+If the database schema matches your Nim definitions, the app starts normally.
+If there's a mismatch (missing column, wrong type, missing constraint), the
+app stops immediately with a clear error message — before any queries execute.
+
+For CI/CD, use the standalone CLI tool:
+
+```bash
+nimble verify -- --table=users --field=id:int64:bigint:pk:notnull ...
+```
+
+See [Schema Verification](./verification.md) for details.
+
+## 6. Next Steps
+
+- [Schema](./schema.md) — fields, types, associations, timestamps, reverse generation, custom types, typed JSONB
+- [Query DSL](./query.md) — where, orderBy, joins, aggregates, compileQuery, verifyQuery, pipe operator
+- [Schema & Query Verification](./verification.md) — compile-time DB checks, query validation, CI/CD integration
 - [Changesets](./changeset.md) — cast, validations, constraints, batch validation
 - [Associations & Preload](./associations.md) — belongs_to, has_many, N+1 safe loading, auto-preload
 - [Migrations](./migrations.md) — DSL, versioning, rollback
+- [Benchmarks](./benchmarks.md) — performance comparison vs raw SQL

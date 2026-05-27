@@ -199,6 +199,8 @@ macro necto_schema*(name: untyped, body: untyped): untyped =
   var constructorAssignments: seq[NimNode] = @[]
   var rowLoadAssignments: seq[NimNode] = @[]
   var changesetFuncs: seq[NimNode] = @[]
+  var hasVerify = false
+  var verifyFields: seq[(string, string, string, string, bool, bool, bool)] = @[]
 
   for child in body:
     if child.kind == nnkIdent:
@@ -273,6 +275,9 @@ macro necto_schema*(name: untyped, body: untyped): untyped =
         let nimTypeStr = nimTypeToString(fieldType)
         let dbTypeStr = dbTypeForNim(nimTypeStr)
         let dbCol = toDbColumn(fieldName)
+
+        # Запомни за verify
+        verifyFields.add((fieldName, dbCol, nimTypeStr, dbTypeStr, isPrimaryKey, isNullable, isUnique))
 
         # Добавяне на полето в тип дефиницията
         fieldDefs.add(newIdentDefs(newIdentNode(fieldName), fieldType))
@@ -410,8 +415,11 @@ macro necto_schema*(name: untyped, body: untyped): untyped =
           nnkExprColonExpr.newTree(newIdentNode("ownerKey"), newLit("id"))
         ))
 
+      elif cmdName == "verify":
+        hasVerify = true
+
       elif cmdName == "changeset":
-        ## Для по-късно — генерира changeset функция
+        ## За по-късно — генерира changeset функция
         let changesetName = $child[1]
         let changesetBody = child[2]
 
@@ -804,6 +812,41 @@ macro necto_schema*(name: untyped, body: untyped): untyped =
   result.add(dispatchProcs)
   for cf in changesetFuncs:
     result.add(cf)
+
+  # --- Генериране на compile-time schema verification блок ---
+  if hasVerify:
+    var fieldInfoNodes = newTree(nnkBracket)
+    for (nimName, dbCol, nimType, dbType, isPk, isNullable, isUnique) in verifyFields:
+      fieldInfoNodes.add(quote do:
+        SchemaFieldInfo(
+          nimName: `nimName`,
+          dbColumn: `dbCol`,
+          nimType: `nimType`,
+          dbType: `dbType`,
+          isPrimaryKey: `isPk`,
+          isNullable: `isNullable`,
+          isUnique: `isUnique`
+        )
+      )
+
+    let verifyProcName = newIdentNode("verify" & schemaName & "Schema")
+    let verifyBlock = quote do:
+      when defined(nectoVerify):
+        import necto/schema_verifier
+
+        proc `verifyProcName`() {.used.} =
+          let cfg = getDbConfig()
+          let fields = `fieldInfoNodes`
+          let r = verifySchema(cfg.host, cfg.port, cfg.user, cfg.password,
+                               cfg.database, `finalTableName`, fields)
+          if r.errors.len > 0 or r.warnings.len > 0:
+            echo formatResult(r)
+          if r.errors.len > 0:
+            quit(1)
+
+        `verifyProcName`()
+
+    result.add(verifyBlock)
 
   # Коментирайте за debug:
   # echo result.repr

@@ -27,6 +27,9 @@ task gen_schema, "Generate schema from existing PostgreSQL table":
   echo "Run directly: nim c -r --path:src src/necto_gen_schema.nim --table TABLE_NAME"
   echo "Options: --table, --output, --module, --schema, --host, --port, --user, --password, --database"
 
+task verify, "Verify schema against PostgreSQL database":
+  exec "nim c -r --path:src src/necto_verify.nim"
+
 # --- Test tasks ---
 
 task test, "Run all test suites":

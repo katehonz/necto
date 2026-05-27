@@ -49,6 +49,8 @@ necto/
 │       ├── preloader.nim            # Batch preload (N+1 safe), typedesc dispatch
 │       ├── migration.nim            # Migration DSL + SQL генератори
 │       ├── migrator.nim             # Runner, версиониране, CLI hooks
+│       ├── schema_verifier.nim      # Compile-time проверка на схема срещу БД
+│       ├── query_verifier.nim       # Query валидация чрез EXPLAIN + проверка на колони
 │       ├── adapters/
 │       │   ├── base.nim             # Adapter интерфейс
 │       │   └── postgres.nim         # PostgreSQL имплементация + пул
@@ -63,6 +65,8 @@ necto/
 │   ├── t_changeset.nim              # Cast, валидации, грешки
 │   ├── t_associations.nim           # BelongsTo, HasMany, preload
 │   ├── t_migrations.nim             # Миграции up/down
+│   ├── t_verify.nim                # Schema verification тестове
+│   ├── t_query_verify.nim          # Query verification тестове
 │   └── t_integration.nim            # Пълен интеграционен тест (CRUD + query + preload)
 └── examples/
     └── friends/                     # Пълен пример със seed + CRUD + query
