@@ -558,7 +558,7 @@ template toBoundQuery*[T](q: Query[T]): BoundQuery =
     var cteParts: seq[string] = @[]
     for cte in q.ctes:
       var cteSql = cte.query.sql
-      for i in 1..30:
+      for i in countdown(30, 1):
         cteSql = cteSql.replace($"$" & $i, $"$" & $(idx + i - 1))
       cteParts.add(cte.name & " AS (" & cteSql & ")")
       for arg in cte.query.args:
@@ -1001,7 +1001,7 @@ proc querySql*[T](q: Query[T]): string =
   ## Returns just the SQL string with all placeholders resolved to NULL.
   ## Useful for EXPLAIN verification and debugging.
   var bq = q.toBoundQuery()
-  for i in 1..30:
+  for i in countdown(30, 1):
     bq.sql = bq.sql.replace("$" & $i, "NULL")
   bq.sql
 

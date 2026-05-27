@@ -40,6 +40,9 @@ proc newRepo*(adapter: Adapter; readAdapter: Adapter = nil): Repo =
 var threadLocalConn {.threadvar.}: Connection
 var savepointStack {.threadvar.}: seq[string]
 
+proc getThreadLocalConn*(): Connection = threadLocalConn
+proc setThreadLocalConn*(conn: Connection) = threadLocalConn = conn
+
 # Tenant aliases (дефинирани в query.nim, re-export за удобство)
 proc setTenant*(repo: Repo, tenant: string) =
   setQueryTenant(tenant)
@@ -1051,7 +1054,10 @@ proc `hardDelete!`*[T](repo: Repo, cs: Changeset[T]): T =
 proc transaction*(repo: Repo, body: proc()) =
   ## Изпълнява блок в транзакция.
   ## Всички repo операции вътре в body ползват една и съща връзка.
-  let conn = repo.adapter.connect()
+  ## Ако threadLocalConn е вече зададена (напр. от advisory lock),
+  ## използваме я вместо да създаваме нова връзка.
+  let existingConn = threadLocalConn
+  let conn = if existingConn != nil: existingConn else: repo.adapter.connect()
   let prevConn = threadLocalConn
   let prevStack = savepointStack
   threadLocalConn = conn
@@ -1075,7 +1081,9 @@ proc transaction*(repo: Repo, body: proc()) =
   finally:
     threadLocalConn = prevConn
     savepointStack = prevStack
-    repo.adapter.disconnect(conn)
+    # Only disconnect if we created the connection ourselves
+    if existingConn == nil:
+      repo.adapter.disconnect(conn)
 
 template savepoint*(repo: Repo, name: string, body: untyped): untyped =
   ## Изпълнява блок в PostgreSQL SAVEPOINT.

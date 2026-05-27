@@ -111,7 +111,12 @@ proc checkout*(a: PostgresAdapter): pg.DbConn =
       inc a.activeConns
       if a.activeConns > a.metricsPeakActiveConns:
         a.metricsPeakActiveConns = a.activeConns
-      return a.newConnection()
+      try:
+        return a.newConnection()
+      except:
+        withLock a.poolLock:
+          dec a.activeConns
+        raise
     else:
       inc a.metricsPoolExhaustedCount
       raise newException(DbError, "PostgreSQL connection pool exhausted (max: " & $a.maxConns & ")")
@@ -171,6 +176,7 @@ proc pgQuery(a: PostgresAdapter, conn: PgConnection, sql: string, args: seq[stri
       return
     # Prepared statement was lost (e.g. connection reset) — re-prepare
     libpq.pqclear(result)
+    conn.preparedStmts.del(sql)
     needPrepare = true
   else:
     needPrepare = true

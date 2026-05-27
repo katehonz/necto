@@ -44,6 +44,7 @@ type
     primaryKey*: bool
     unique*: bool
     reference*: string
+    onDelete*: string
 
 # --- Глобален регистър ---
 
@@ -82,7 +83,8 @@ proc references*(tableName: string; colName: string = "", onDelete: string = "SE
     name: fkCol,
     dbType: "bigint",
     null: true,
-    reference: tableName & "(id)"
+    reference: tableName & "(id)",
+    onDelete: onDelete
   )
 
 proc timestamps*(): seq[ColumnDef] =
@@ -117,6 +119,8 @@ proc columnToSql(c: ColumnDef): string =
     parts.add("UNIQUE")
   if c.reference.len > 0:
     parts.add("REFERENCES " & c.reference)
+    if c.onDelete.len > 0:
+      parts.add("ON DELETE " & c.onDelete)
   parts.join(" ")
 
 proc createTableSql*(tableName: string, columns: seq[ColumnDef]): string =
@@ -149,12 +153,16 @@ proc renameTableSql*(oldName, newName: string): string =
 proc addReferenceSql*(tableName, refTable, colName: string;
                       onDelete: string = "SET NULL"): string =
   let fkCol = if colName.len > 0: colName else: refTable & "_id"
+  let fkName = "fk_" & tableName & "_" & fkCol
   "ALTER TABLE \"" & tableName & "\" ADD COLUMN \"" & fkCol &
-  "\" BIGINT REFERENCES \"" & refTable & "\"(id) ON DELETE " & onDelete
+  "\" BIGINT, ADD CONSTRAINT \"" & fkName &
+  "\" FOREIGN KEY (\"" & fkCol & "\") REFERENCES \"" & refTable & "\"(id) ON DELETE " & onDelete
 
 proc removeReferenceSql*(tableName, refTable, colName: string): string =
   let fkCol = if colName.len > 0: colName else: refTable & "_id"
-  "ALTER TABLE \"" & tableName & "\" DROP COLUMN IF EXISTS \"" & fkCol & "\""
+  let fkName = "fk_" & tableName & "_" & fkCol
+  "ALTER TABLE \"" & tableName & "\" DROP CONSTRAINT IF EXISTS \"" & fkName &
+  "\", DROP COLUMN IF EXISTS \"" & fkCol & "\""
 
 proc createIndexSql*(tableName: string, columns: seq[string];
                      unique: bool = false, indexName: string = ""): string =
@@ -286,10 +294,9 @@ proc reverseMigrationStmt(stmt: NimNode): NimNode =
       result = newEmptyNode()
     of "addReference":
       # addReference(repo, table, refTable, ...) → removeReference(repo, table, refTable, ...)
+      # Only copy positional args (indices 1-3), skip named args like onDelete:
       if stmt.len >= 4:
-        result = newCall(newIdentNode("removeReference"))
-        for i in 1..<stmt.len:
-          result.add(stmt[i])
+        result = newCall(newIdentNode("removeReference"), stmt[1], stmt[2], stmt[3])
       else:
         result = newEmptyNode()
     of "removeReference":

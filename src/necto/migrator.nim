@@ -44,18 +44,21 @@ proc withAdvisoryLock*(mig: Migrator, body: proc()) =
     return
 
   let lockId = advisoryLockId(mig.migrationsTable)
-  let conn = mig.repo.getWriteConn()
+  let conn = mig.repo.adapter.connect()
+  let prevConn = getThreadLocalConn()
+  setThreadLocalConn(conn)
   try:
     let lockSql = "SELECT pg_advisory_lock(" & $lockId & ")"
     mig.repo.adapter.exec(conn, lockSql)
     body()
   finally:
+    setThreadLocalConn(prevConn)
     let unlockSql = "SELECT pg_advisory_unlock(" & $lockId & ")"
     try:
       mig.repo.adapter.exec(conn, unlockSql)
     except DatabaseError:
       discard
-    mig.repo.releaseConn(conn, mig.repo.adapter)
+    mig.repo.adapter.disconnect(conn)
 
 # --- Bootstrap ---
 
