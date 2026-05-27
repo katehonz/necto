@@ -95,7 +95,7 @@ PostgreSQL JSONB оператори интегрирани в Query builder:
 ### Фаза 2: Nim Superpowers (в progress)
 - **Static FK checks** — compile-time foreign key type validation (blocked by CT eval)
 - **Compile-time JSON paths** — type-safe JSONB path extraction
-- **Zero-copy array loading** — direct PG array → Nim seq без intermediate string
+- ✅ **Zero-copy array loading** — slice-based `pgArrayElements` iterator + specialized fast paths за `seq[int]`, `seq[int64]`, `seq[float]`, `seq[bool]`
 - **Compile-time query plan caching** — EXPLAIN планове кеширани на compile time
 
 ### Фаза 3: Production ready
@@ -123,6 +123,7 @@ PostgreSQL JSONB оператори интегрирани в Query builder:
 | **Typed JSONB** `JsonB[T]` | ✅ | ❌ | Nim типова сериализация в JSONB |
 | **JSONB query operators** | ✅ | ❌ | `@>`, `?`, `?|`, `?&`, `#>>` в Query builder |
 | **Fixed-point Decimal** | ✅ | ❌ | `FixedDecimal[Scale]` — compile-time scaled |
+| **Zero-copy array loading** | ✅ | ❌ | Slice-based parsing за `seq[int]`/`seq[int64]`/`seq[float]`/`seq[bool]` |
 | **Compile-time schema verification** | ✅ | ❌ | `-d:nectoVerify` проверява таблици/колони при компилация |
 | **Compile-time query verification** | ✅ | ❌ | EXPLAIN-based validation при стартиране |
 | **Schema reverse engineering** | ✅ | ❌ | `necto_gen_schema` от `information_schema` |

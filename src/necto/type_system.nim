@@ -280,6 +280,121 @@ proc castValue*[T](val: string, OptT: typedesc[seq[T]]): seq[T] =
 
 # --- Load from DB row string ---
 
+# --- Zero-allocation array loading (slice-based) ---
+
+iterator pgArrayElements(val: string): tuple[start, stop: int] =
+  ## Yield start/stop indices for each element in PostgreSQL array format.
+  ## Does NOT allocate intermediate strings.
+  if val.len >= 2 and val[0] == '{' and val[^1] == '}':
+    if val != "{}":
+      var i = 1
+      while i < val.len - 1:
+        if val[i] == ',':
+          inc i
+          continue
+        var start = i
+        if val[i] == '"':
+          inc i
+          start = i
+          while i < val.len - 1:
+            if val[i] == '\\' and i + 1 < val.len:
+              inc i, 2
+            elif val[i] == '"':
+              break
+            else:
+              inc i
+          yield (start, i)
+          if i < val.len and val[i] == '"':
+            inc i
+        else:
+          var depth = 0
+          while i < val.len - 1:
+            if val[i] == '{':
+              inc depth
+            elif val[i] == '}':
+              if depth > 0:
+                dec depth
+              else:
+                break
+            elif val[i] == ',' and depth == 0:
+              break
+            inc i
+          yield (start, i)
+        while i < val.len - 1 and val[i] == ',':
+          inc i
+
+proc loadValueSlice*(val: string, start, stop: int, T: typedesc[int]): int =
+  ## Parse int directly from a string slice (zero-allocation).
+  if stop <= start: return 0
+  var i = start
+  var negative = false
+  if val[i] == '-':
+    negative = true
+    inc i
+  result = 0
+  while i < stop and val[i] in {'0'..'9'}:
+    result = result * 10 + (val[i].ord - '0'.ord)
+    inc i
+  if negative: result = -result
+
+proc loadValueSlice*(val: string, start, stop: int, T: typedesc[int64]): int64 =
+  ## Parse int64 directly from a string slice (zero-allocation).
+  if stop <= start: return 0'i64
+  var i = start
+  var negative = false
+  if val[i] == '-':
+    negative = true
+    inc i
+  result = 0'i64
+  while i < stop and val[i] in {'0'..'9'}:
+    result = result * 10'i64 + (val[i].ord - '0'.ord).int64
+    inc i
+  if negative: result = -result
+
+proc loadValueSlice*(val: string, start, stop: int, T: typedesc[float]): float =
+  ## Parse float directly from a string slice (minimal allocation).
+  if stop <= start: return 0.0
+  result = parseFloat(val[start ..< stop])
+
+proc loadValueSlice*(val: string, start, stop: int, T: typedesc[bool]): bool =
+  ## Parse bool directly from a string slice (zero-allocation).
+  if stop <= start: return false
+  if val[start] == 't': return true
+  if stop - start == 1 and val[start] == '1': return true
+  return false
+
+proc loadPgArray*(val: string, T: typedesc[seq[int]]): seq[int] =
+  ## Fast zero-allocation load for seq[int].
+  if val.len == 0 or val == "{}": return @[]
+  result = @[]
+  for (s, e) in pgArrayElements(val):
+    if e - s == 4 and val[s..<e] == "NULL": continue
+    result.add(loadValueSlice(val, s, e, int))
+
+proc loadPgArray*(val: string, T: typedesc[seq[int64]]): seq[int64] =
+  ## Fast zero-allocation load for seq[int64].
+  if val.len == 0 or val == "{}": return @[]
+  result = @[]
+  for (s, e) in pgArrayElements(val):
+    if e - s == 4 and val[s..<e] == "NULL": continue
+    result.add(loadValueSlice(val, s, e, int64))
+
+proc loadPgArray*(val: string, T: typedesc[seq[float]]): seq[float] =
+  ## Fast load for seq[float] (uses one temporary string per element).
+  if val.len == 0 or val == "{}": return @[]
+  result = @[]
+  for (s, e) in pgArrayElements(val):
+    if e - s == 4 and val[s..<e] == "NULL": continue
+    result.add(loadValueSlice(val, s, e, float))
+
+proc loadPgArray*(val: string, T: typedesc[seq[bool]]): seq[bool] =
+  ## Fast zero-allocation load for seq[bool].
+  if val.len == 0 or val == "{}": return @[]
+  result = @[]
+  for (s, e) in pgArrayElements(val):
+    if e - s == 4 and val[s..<e] == "NULL": continue
+    result.add(loadValueSlice(val, s, e, bool))
+
 proc loadValue*(val: string, T: typedesc[string]): string =
   ## Load стринг от БД (просто връща стойността).
   val
@@ -386,8 +501,24 @@ proc loadValue*[T: enum](val: string, OptT: typedesc[T]): T =
     except ValueError:
       raise newException(ValueError, "Cannot load enum '" & $T & "' from: " & val)
 
+proc loadValue*(val: string, T: typedesc[seq[int]]): seq[int] =
+  ## Load PostgreSQL array → seq[int] (zero-allocation fast path).
+  loadPgArray(val, seq[int])
+
+proc loadValue*(val: string, T: typedesc[seq[int64]]): seq[int64] =
+  ## Load PostgreSQL array → seq[int64] (zero-allocation fast path).
+  loadPgArray(val, seq[int64])
+
+proc loadValue*(val: string, T: typedesc[seq[float]]): seq[float] =
+  ## Load PostgreSQL array → seq[float] (fast path).
+  loadPgArray(val, seq[float])
+
+proc loadValue*(val: string, T: typedesc[seq[bool]]): seq[bool] =
+  ## Load PostgreSQL array → seq[bool] (zero-allocation fast path).
+  loadPgArray(val, seq[bool])
+
 proc loadValue*[T](val: string, OptT: typedesc[seq[T]]): seq[T] =
-  ## Load PostgreSQL array текстов формат.
+  ## Load PostgreSQL array текстов формат (generic fallback).
   if val.len == 0 or val == "{}":
     return @[]
   let elements = parsePgArray(val)
