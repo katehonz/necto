@@ -78,6 +78,12 @@ method commitTransaction*(a: Adapter, conn: Connection) {.base.} =
 method rollbackTransaction*(a: Adapter, conn: Connection) {.base.} =
   raise newException(DatabaseError, "rollbackTransaction not implemented")
 
+method savepoint*(a: Adapter, conn: Connection, name: string) {.base.} =
+  raise newException(DatabaseError, "savepoint not implemented")
+
+method rollbackToSavepoint*(a: Adapter, conn: Connection, name: string) {.base.} =
+  raise newException(DatabaseError, "rollbackToSavepoint not implemented")
+
 method poolMetrics*(a: Adapter): PoolMetrics {.base.} =
   ## Връща метрики за connection pool-а. Базовата имплементация връща празни метрики.
   PoolMetrics()

@@ -61,6 +61,7 @@ type
     field*: string
     op*: WhereOp
     value*: string
+    conjunction*: string  ## "AND" | "OR"
 
   Query*[T] = object
     ## Структура, която натрупва SQL фрагменти.
@@ -182,10 +183,10 @@ proc groupBy*[T](q: Query[T], fields: varargs[string]): Query[T] =
   result = q
   result.groupByFields = @fields
 
-proc having*[T](q: Query[T], field: string, op: WhereOp, value: string): Query[T] =
+proc having*[T](q: Query[T], field: string, op: WhereOp, value: string; conjunction: string = "AND"): Query[T] =
   ## Добавя HAVING условие.
   result = q
-  result.havingClauses.add(HavingClause(field: field, op: op, value: value))
+  result.havingClauses.add(HavingClause(field: field, op: op, value: value, conjunction: conjunction))
 
 # --- Raw SQL фрагменти ---
 
@@ -340,6 +341,10 @@ template toBoundQuery*[T](q: Query[T]): BoundQuery =
         havings.add("\"" & h.field & "\" = $" & $idx)
         args.add(h.value)
         inc idx
+      of Ne:
+        havings.add("\"" & h.field & "\" != $" & $idx)
+        args.add(h.value)
+        inc idx
       of Gt:
         havings.add("\"" & h.field & "\" > $" & $idx)
         args.add(h.value)
@@ -356,9 +361,28 @@ template toBoundQuery*[T](q: Query[T]): BoundQuery =
         havings.add("\"" & h.field & "\" <= $" & $idx)
         args.add(h.value)
         inc idx
-      else:
-        havings.add("\"" & h.field & "\"")
-    parts.add(havings.join(" AND "))
+      of Like:
+        havings.add("\"" & h.field & "\" LIKE $" & $idx)
+        args.add(h.value)
+        inc idx
+      of Ilike:
+        havings.add("\"" & h.field & "\" ILIKE $" & $idx)
+        args.add(h.value)
+        inc idx
+      of In:
+        havings.add("\"" & h.field & "\" IN ($" & $idx & ")")
+        args.add(h.value)
+        inc idx
+      of IsNull:
+        havings.add("\"" & h.field & "\" IS NULL")
+      of NotNull:
+        havings.add("\"" & h.field & "\" IS NOT NULL")
+    var havingParts: seq[string] = @[]
+    for i, h in havings:
+      if i > 0:
+        havingParts.add(q.havingClauses[i].conjunction)
+      havingParts.add(h)
+    parts.add(havingParts.join(" "))
 
   if q.limitVal.isSome:
     parts.add("LIMIT $" & $idx)

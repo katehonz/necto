@@ -304,3 +304,9 @@ method commitTransaction*(a: PostgresAdapter, conn: Connection) =
 
 method rollbackTransaction*(a: PostgresAdapter, conn: Connection) =
   a.exec(conn, "ROLLBACK", @[])
+
+method savepoint*(a: PostgresAdapter, conn: Connection, name: string) =
+  a.exec(conn, "SAVEPOINT " & name, @[])
+
+method rollbackToSavepoint*(a: PostgresAdapter, conn: Connection, name: string) =
+  a.exec(conn, "ROLLBACK TO SAVEPOINT " & name, @[])

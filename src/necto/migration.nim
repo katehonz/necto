@@ -236,11 +236,94 @@ proc dropConstraint*(repo: auto, tableName, constraintName: string) =
 
 # --- Макро за дефиниране на миграция с auto-registration ---
 
+proc reverseMigrationStmt(stmt: NimNode): NimNode =
+  ## Инвертира една миграционна операция за `change` direction.
+  ## Поддържа: createTable→dropTable, addColumn→dropColumn,
+  ## addIndex→dropIndex, addReference→removeReference,
+  ## renameTable, renameColumn.
+  if stmt.kind in {nnkCall, nnkCommand}:
+    let fnName = $stmt[0]
+    case fnName
+    of "createTable":
+      # createTable(repo, name, cols) → dropTable(repo, name)
+      if stmt.len >= 3:
+        result = newCall(newIdentNode("dropTable"), stmt[1], stmt[2])
+      else:
+        result = newEmptyNode()
+    of "dropTable":
+      # dropTable не е reversible без schema info — игнорираме
+      result = newEmptyNode()
+    of "addColumn":
+      # addColumn(repo, table, col, type, ...) → dropColumn(repo, table, col)
+      if stmt.len >= 4:
+        result = newCall(newIdentNode("dropColumn"), stmt[1], stmt[2], stmt[3])
+      else:
+        result = newEmptyNode()
+    of "dropColumn":
+      result = newEmptyNode()
+    of "renameTable":
+      # renameTable(repo, old, new) → renameTable(repo, new, old)
+      if stmt.len >= 4:
+        result = newCall(newIdentNode("renameTable"), stmt[1], stmt[3], stmt[2])
+      else:
+        result = newEmptyNode()
+    of "renameColumn":
+      # renameColumn(repo, table, old, new) → renameColumn(repo, table, new, old)
+      if stmt.len >= 5:
+        result = newCall(newIdentNode("renameColumn"), stmt[1], stmt[2], stmt[4], stmt[3])
+      else:
+        result = newEmptyNode()
+    of "createIndex":
+      # createIndex(repo, table, columns, ...) → dropIndex(repo, table, columns, ...)
+      if stmt.len >= 4:
+        result = newCall(newIdentNode("dropIndex"))
+        for i in 1..<stmt.len:
+          result.add(stmt[i])
+      else:
+        result = newEmptyNode()
+    of "dropIndex":
+      result = newEmptyNode()
+    of "addReference":
+      # addReference(repo, table, refTable, ...) → removeReference(repo, table, refTable, ...)
+      if stmt.len >= 4:
+        result = newCall(newIdentNode("removeReference"))
+        for i in 1..<stmt.len:
+          result.add(stmt[i])
+      else:
+        result = newEmptyNode()
+    of "removeReference":
+      result = newEmptyNode()
+    of "addConstraint":
+      # addConstraint(repo, table, name, def) → dropConstraint(repo, table, name)
+      if stmt.len >= 5:
+        result = newCall(newIdentNode("dropConstraint"), stmt[1], stmt[2], stmt[3])
+      else:
+        result = newEmptyNode()
+    of "dropConstraint":
+      result = newEmptyNode()
+    else:
+      result = newEmptyNode()
+  else:
+    result = newEmptyNode()
+
+proc buildDownFromChange(changeBody: NimNode): NimNode =
+  ## Генерира `down` тяло от `change` тяло чрез reverse на операциите.
+  result = newStmtList()
+  var reversed: seq[NimNode] = @[]
+  for stmt in changeBody:
+    let rev = reverseMigrationStmt(stmt)
+    if rev.kind != nnkEmpty:
+      reversed.add(rev)
+  # down е reverse редът на операциите
+  for i in countdown(reversed.high, 0):
+    result.add(reversed[i])
+
 macro necto_migration*(name: untyped, version: static[string], body: untyped): untyped =
   result = newStmtList()
 
   var upBody: NimNode = newEmptyNode()
   var downBody: NimNode = newEmptyNode()
+  var changeBody: NimNode = newEmptyNode()
 
   for child in body:
     if child.kind in {nnkCall, nnkCommand}:
@@ -249,6 +332,15 @@ macro necto_migration*(name: untyped, version: static[string], body: untyped): u
         upBody = child[1]
       elif cmdName == "down":
         downBody = child[1]
+      elif cmdName == "change":
+        changeBody = child[1]
+
+  if changeBody.kind != nnkEmpty:
+    upBody = changeBody
+    downBody = buildDownFromChange(changeBody)
+
+  if upBody.kind == nnkEmpty:
+    error("Migration " & $name & " must have 'up', 'down', or 'change' block")
 
   let typeName = name
   let typeNameStr = $name

@@ -321,3 +321,48 @@ suite "Associations and Preload":
     let prof = testrepoInstance.insert(profCs)
     check(prof.bio == "Built bio")
     check(prof.user_id == user.id)
+
+  test "build_assoc with explicit assocName finds correct FK":
+    var userCs = newChangeset(newUser(), {"name": "NamedBuilder"}.toTable)
+    userCs = userCs.castFields(@["name"])
+    let user = testrepoInstance.insert(userCs)
+
+    # Explicit assocName "posts" should resolve correctly
+    var postCs = build_assoc(user, Post, {"title": "Named Post"}.toTable, "posts")
+    postCs = postCs.castFields(@["title", "author_id"])
+    check(postCs.isValid)
+    check(postCs.data.author_id == user.id)
+
+    let post = testrepoInstance.insert(postCs)
+    check(post.title == "Named Post")
+    check(post.author_id == user.id)
+
+  test "oneWithPreload loads has_one association":
+    var userCs = newChangeset(newUser(), {"name": "OneProfile"}.toTable)
+    userCs = userCs.castFields(@["name"])
+    let user = testrepoInstance.insert(userCs)
+
+    var profCs = newChangeset(newProfile(), {"bio": "One bio", "user_id": $user.id}.toTable)
+    profCs = profCs.castFields(@["bio", "user_id"])
+    discard testrepoInstance.insert(profCs)
+
+    let maybeUser = testrepoInstance.oneWithPreload(
+      fromSchema(User).where("name", Eq, "OneProfile"), "profile"
+    )
+    check(maybeUser.isSome)
+    check(maybeUser.get.profile.bio == "One bio")
+
+  test "oneWithPreload loads belongs_to association":
+    var userCs = newChangeset(newUser(), {"name": "OneAuthor2"}.toTable)
+    userCs = userCs.castFields(@["name"])
+    let author = testrepoInstance.insert(userCs)
+
+    var pCs = newChangeset(newPost(), {"title": "OnePost2", "author_id": $author.id}.toTable)
+    pCs = pCs.castFields(@["title", "author_id"])
+    discard testrepoInstance.insert(pCs)
+
+    let maybePost = testrepoInstance.oneWithPreload(
+      fromSchema(Post).where("title", Eq, "OnePost2"), "author"
+    )
+    check(maybePost.isSome)
+    check(maybePost.get.author.name == "OneAuthor2")

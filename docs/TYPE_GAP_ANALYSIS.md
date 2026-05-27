@@ -1,130 +1,105 @@
-# Анализ: Какво липсва на necto спрямо Ecto и Avram
+# Анализ: Necto спрямо Ecto и Avram — Актуално състояние
+
+> **Важно:** Този документ беше напълно преработен на 2026-05-27. Предишната версия
+> описваше липси, които вече са имплементирани. Ако сте чели старата версия —
+> почти всичко вече работи.
 
 ## Резюме
 
-Necto има **основните скалари**, но липсват критични типове за production PostgreSQL приложения — UUID, Decimal, Date/Time, масиви, Enum и пълноценна JSON поддръжка. Този документ описва разликите и план за догонване.
-
----
+Necto има **пълна поддръжка на всички скаларни PostgreSQL типове**, включително
+UUID, Decimal, Date/Time, JSONB, масиви, bytea и Enum. Критичните липси са вече
+на ниво архитектура — `many_to_many`, embedded schemas, composable transactions
+и production readiness фичъри.
 
 ## Сравнителна таблица
 
-| Тип | PostgreSQL | Necto (сега) | Ecto | Avram | Липса |
-|-----|-----------|--------------|------|-------|-------|
+| Тип | PostgreSQL | Necto | Ecto | Avram | Бележка |
+|-----|-----------|-------|------|-------|---------|
 | `string` | `text`, `varchar` | ✅ `string` | ✅ `:string` | ✅ `String` | — |
 | `int` | `integer` | ✅ `int` | ✅ `:integer` | ✅ `Int32` | — |
 | `int64` | `bigint` | ✅ `int64` | ✅ `:id`/`:integer` | ✅ `Int64` | — |
-| `int16` | `smallint` | ❌ — | ✅ `:integer` | ✅ `Int16` | **Няма тип** |
+| `int16` | `smallint` | ✅ `int16` | ✅ `:integer` | ✅ `Int16` | ✅ Добавен 2026-05 |
 | `float` | `double precision` | ✅ `float` | ✅ `:float` | ✅ `Float64` | — |
 | `bool` | `boolean` | ✅ `bool` | ✅ `:boolean` | ✅ `Bool` | — |
 | `DateTime` | `timestamptz` | ✅ `DateTime` | ✅ `:utc_datetime` | ✅ `Time` | — |
-| `Date` | `date` | ❌ — | ✅ `:date` | ❌? | **Няма тип** |
-| `Time` | `time`, `timetz` | ❌ — | ✅ `:time` | ✅ `Time` | **Няма тип** |
-| `JsonNode` | `json`, `jsonb` | ⚠️ Частично | ✅ `:map` | ✅ `JSON::Any` | **load/dump липсват** |
-| `UUID` | `uuid` | ❌ — | ✅ `Ecto.UUID` | ✅ `UUID` | **Няма тип** |
-| `Decimal` | `numeric`, `decimal` | ❌ (float) | ✅ `:decimal` | ✅ `PG::Numeric` | **Няма тип** |
-| `seq[T]` | масиви | ❌ placeholder | ✅ `{:array, T}` | ✅ `Array(T)` | **Няма имплементация** |
-| `Enum` | `integer`/`string` | ❌ — | ✅ `Ecto.Enum` | ✅ `Enum` | **Няма тип** |
-| `bytea` | `bytea` | ⚠️ schema gen only | ✅ `:binary` | ✅ `Bytes` | **Няма load/dump** |
-| Custom types | — | ⚠️ ad-hoc overload | ✅ `Ecto.Type` behaviour | ⚠️ extensions | **Няма формална система** |
+| `Date` | `date` | ✅ `Date` | ✅ `:date` | ❌? | ✅ Добавен 2026-05 |
+| `TimeOfDay` | `time` | ✅ `TimeOfDay` | ✅ `:time` | ✅ `Time` | ✅ Добавен 2026-05 |
+| `JsonNode` | `json`, `jsonb` | ✅ Пълна | ✅ `:map` | ✅ `JSON::Any` | ✅ load/dump/tested |
+| `UUID` | `uuid` | ✅ `Uuid` | ✅ `Ecto.UUID` | ✅ `UUID` | ✅ Добавен 2026-05 |
+| `Decimal` | `numeric` | ✅ `Decimal` | ✅ `:decimal` | ✅ `PG::Numeric` | ✅ String wrapper |
+| `seq[T]` | масиви | ✅ Пълна | ✅ `{:array, T}` | ✅ `Array(T)` | ✅ PG array parser |
+| `Enum` | `text`/`int` | ✅ `enum` | ✅ `Ecto.Enum` | ✅ `Enum` | ✅ Stored as text |
+| `bytea` | `bytea` | ✅ `seq[byte]` | ✅ `:binary` | ✅ `Bytes` | ✅ Hex escape |
+| `Option[T]` | nullable | ✅ | ✅ | ✅ | — |
+| `JsonB[T]` | `jsonb` | ✅ Typed JSONB | ❌ Няма | ❌ Няма | 🚀 **Уникално за Necto** |
+| Custom types | — | ✅ `registerNectoType` | ✅ `Ecto.Type` | ⚠️ extensions | ✅ 4-proc convention |
+
+### PostgreSQL-специфични типове (опционален модул)
+
+| Тип | PostgreSQL | Статус |
+|-----|-----------|--------|
+| `PgPoint` | `point` | ✅ |
+| `PgInet` | `inet` | ✅ |
+| `PgCidr` | `cidr` | ✅ |
+| `PgMacAddr` | `macaddr` | ✅ |
+| `PgTsVector` | `tsvector` | ✅ |
+| `PgTsQuery` | `tsquery` | ✅ |
+| `Money` | `bigint` (fixed-point) | ✅ Пример custom type |
 
 ---
 
-## Детайли по липсите
+## Какво липсва (архитектурно ниво)
 
-### 1. JsonNode — частично (Критично)
-- `dbType` и `dbTypeForNim` работят (`jsonb`)
-- **Липсват** `loadValue*(val: string, T: typedesc[JsonNode]): JsonNode`
-- **Липсват** `dumpValue*(val: JsonNode): string`
-- Schema generator го разпознава, но компилация спира при `repo.all()` или `repo.insert()`
+### 1. `many_to_many` асоциации
+Necto има само `belongs_to`, `has_many`, `has_one`. `many_to_many` с join таблица
+е най-често искания missing feature.
 
-### 2. UUID — липсва напълно
-- Няма Nim тип, няма PostgreSQL mapping
-- Ecto го има като `Ecto.UUID` (custom type)
-- Avram го има като `UUID` (crystal std)
+### 2. Embedded schemas (`embeds_one` / `embeds_many`)
+Ecto позволява nested обекти със свой changeset, запазени в една колона (`jsonb`).
+Necto има `JsonB[T]` за typed JSON, но без nested changeset/validation lifecycle.
 
-### 3. Date (само дата) — липсва
-- Nim има `Date` в `times` модул
-- PostgreSQL има `date`
-- Necto има само `DateTime` → `timestamp with time zone`
+### 3. Composable transactions (`Ecto.Multi` еквивалент)
+Necto има императивен `transaction` блок, но не и именуван pipeline от операции
+с dependency graph и rollback на целия pipeline.
 
-### 4. Time (само час) — липсва
-- Nim има `Time` в `times` модул
-- PostgreSQL има `time`, `time with time zone`
-- Ecto има `:time`, `:time_usec`
+### 4. Savepoints / nested transactions
+Вложени `transaction()` блокове отварят нова връзка вместо PostgreSQL `SAVEPOINT`.
 
-### 5. Decimal/Numeric — липсва
-- Nim **няма** вграден `Decimal` тип (за разлика от Elixir)
-- PostgreSQL `numeric`/`decimal` е критичен за пари
-- Трябва да се избере/имплементира библиотека
+### 5. Upserts (`ON CONFLICT`)
+Липсва `INSERT ... ON CONFLICT DO NOTHING/UPDATE`.
 
-### 6. Масиви (`seq[T]`) — placeholder
-- `loadValue*[T](val: string, OptT: typedesc[seq[T]]): seq[T]` връща `@[]`
-- `dumpValue*[T](val: seq[T]): string` връща `"{}"`
-- PostgreSQL масивите са пълноценен тип — `{1,2,3}`, `{"a","b"}`
-- Ecto поддържа `{:array, inner_type}`
+### 6. `change` direction за миграции
+Само explicit `up` / `down`. Няма auto-reversible `change` като в Ecto.
 
-### 7. Enum — липсва
-- PostgreSQL има `ENUM` типове
-- Ecto има `Ecto.Enum` (parameterized type, stored as string/int)
-- Типичен use-case: `status: :draft | :published | :archived`
+### 7. Streaming (`repo.stream`)
+Липсва cursor-based streaming за големи резултати.
 
-### 8. Bytea/Binary — липсва
-- Schema generator мапва `bytea` → `seq[byte]`
-- Но няма `loadValue`/`dumpValue` за `seq[byte]`
-- PostgreSQL `bytea` изисква escape/unescape (`\x` формат)
-
-### 9. Custom Type System — ad-hoc
-- Ecto има формален `Ecto.Type` behaviour: `type/0`, `cast/1`, `load/1`, `dump/1`, `equal?/2`, `embed_as/1`
-- Necto има коментар в `type_system.nim`: "overload на `dbType`, `castValue`, `loadValue`, `dumpValue`"
-- Но няма формален `NectoType` trait/concept — потребителят трябва да знае кои proc-ове да overload-не
+### 8. Soft deletes
+Няма built-in `deleted_at` + `.excludeDeleted()` модел.
 
 ---
 
-## План: Догонване → Изпреварване
+## Nim Superpowers (където вече водим)
 
-### Фаза 1: Бързи победи (1-2 дни)
-
-| Задача | Файл | Описание |
-|--------|------|----------|
-| JsonNode load/dump | `type_system.nim` | `parseJson(val)` и `$val` |
-| Date / Time | `type_system.nim`, `schema.nim`, `schema_generator.nim` | Добавяне на `Date` и `Time` от `std/times` |
-| UUID | `type_system.nim`, `schema_generator.nim` | Ново `Uuid` тип (може `array[16, byte]` или `string` wrapper) |
-| Int16 | `type_system.nim`, `schema_generator.nim` | `int16` → `smallint` |
-
-### Фаза 2: Средна сложност (3-5 дни)
-
-| Задача | Файл | Описание |
-|--------|------|----------|
-| PostgreSQL масиви | `type_system.nim` | Парсване на `{a,b,c}` формат за `seq[T]`. Рекурсивно за вложени? |
-| Bytea | `type_system.nim` | `seq[byte]` ↔ PostgreSQL `bytea` hex escape |
-| Enum тип | нов файл `enum_type.nim` | Parameterized тип като в Ecto — `EnumType(["draft", "published"])` |
-| Decimal | research | Оценка на Nim библиотеки: `decimal`, `bignum`, или custom `Decimal` object |
-
-### Фаза 3: Архитектура (1 седмица)
-
-| Задача | Файл | Описание |
-|--------|------|----------|
-| `NectoType` trait/system | нов файл `custom_type.nim` | Формален интерфейс за custom types, подобен на `Ecto.Type` behaviour |
-| Parameterized types | `schema.nim` | Поддръжка на типове с параметри — `EnumType(values)`, `ArrayType(inner)` |
-| Postgres-specific extensions | `adapters/postgres_extensions.nim` | `inet`, `cidr`, `point`, `line`, `interval`, `tsvector` — като optional модул |
-
-### Фаза 4: Изпреварване — уникални за necto (бонус)
-
-| Идея | Защо е уникално |
-|------|----------------|
-| **Compile-time type-safe JSON paths** | Nim macro-та могат да проверяват `user.settings["theme"]` на compile time |
-| **Zero-copy array loading** | Масивите се парсват директно от PostgreSQL wire формат без междинен string |
-| **Integrated JSONB query operators** | `where("data", @> JsonNode)` — natively в query builder |
-| **Decimal като fixed-point** | `int64` backing със зададен scale — по-бързо от arbitrary precision |
+| Способност | Necto | Ecto | Коментар |
+|-----------|-------|------|----------|
+| **Zero-cost абстракции** | ✅ | ❌ | Компилира до C, няма runtime overhead |
+| **Single binary deployment** | ✅ | ❌ | Zero Erlang/Elixir runtime dependencies |
+| **Typed JSONB** `JsonB[T]` | ✅ | ❌ | Nim типова сериализация в JSONB |
+| **Compile-time schema verification** | ✅ | ❌ | `-d:nectoVerify` проверява таблици/колони при компилация |
+| **Compile-time query verification** | ✅ | ❌ | EXPLAIN-based validation при стартиране |
+| **Schema reverse engineering** | ✅ | ❌ | `necto_gen_schema` от `information_schema` |
+| **Compiled query cache** | ✅ | ❌ | `compileQuery()` за zero runtime SQL gen |
+| **Connection pool metrics** | ✅ | ❌ | wait time, active conns, queue depth |
+| **Read replica support** | ✅ | ❌ | `read_host` / `read_port` routing |
 
 ---
 
-## Приоритет
+## План за догонване → Изпреварване
 
-1. **JsonNode load/dump** — блокира всеки, който иска да ползва JSONB
-2. **UUID** — почти всяка модерна PostgreSQL база ползва UUID PK
-3. **Date / Time** — стандартни типове, лесни за добавяне
-4. **Decimal** — критичен за финанси, но изисква dependency
-5. **Масиви** — важни за advanced PostgreSQL
-6. **Enum** — качество на живота, но workaround-ва се с `string`/`int`
-7. **Custom type system** — needed за екосистема от плъгини
+Вж. `ROADMAP.md` за детайлен план. Приоритет:
+1. **Фаза 0:** Бъгфиксове (вече в progress)
+2. **Фаза 1:** Ecto parity — Multi, many_to_many, embeds, savepoints, upserts
+3. **Фаза 2:** Nim Superpowers — compile-time JSON paths, zero-copy arrays, fixed-point Decimal
+4. **Фаза 3:** Production ready — streaming, soft deletes, migration locking, FTS
+5. **Фаза 4:** Ecosystem — benchmarks, integrations, auth module

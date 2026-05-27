@@ -88,3 +88,43 @@ suite "Compiled Query Cache":
     let directBq = directQ.toBoundQuery()
     check(cachedQ.sql == directBq.sql)
     check(cachedQ.args == directBq.args)
+
+  test "HAVING with Eq operator generates valid SQL":
+    let q = fromSchema(CqUser).groupBy("active").having("age", Eq, "25")
+    let bq = q.toBoundQuery()
+    check(bq.sql.find("GROUP BY") >= 0)
+    check(bq.sql.find("HAVING") >= 0)
+    check(bq.sql.find("\"age\" = $1") >= 0)
+
+  test "HAVING with Like operator generates valid SQL":
+    let q = fromSchema(CqUser).groupBy("active").having("name", Like, "%test%")
+    let bq = q.toBoundQuery()
+    check(bq.sql.find("\"name\" LIKE $") >= 0)
+
+  test "HAVING with In operator generates valid SQL":
+    let q = fromSchema(CqUser).groupBy("active").having("age", In, "25")
+    let bq = q.toBoundQuery()
+    check(bq.sql.find("\"age\" IN ($") >= 0)
+
+  test "HAVING with IsNull operator generates valid SQL":
+    let q = fromSchema(CqUser).groupBy("active").having("name", IsNull, "")
+    let bq = q.toBoundQuery()
+    check(bq.sql.find("\"name\" IS NULL") >= 0)
+    check(bq.sql.find("$1") < 0)  # No placeholder for IS NULL
+
+  test "HAVING with multiple clauses uses conjunction":
+    let q = fromSchema(CqUser).groupBy("active")
+      .having("age", Gt, "18")
+      .having("name", Like, "%A%")
+    let bq = q.toBoundQuery()
+    check(bq.sql.find("AND") >= 0)
+
+  test "count() with GROUP BY raises QueryError":
+    var raised = false
+    try:
+      discard testrepoInstance.count(
+        fromSchema(CqUser).groupBy("active")
+      )
+    except QueryError:
+      raised = true
+    check(raised)

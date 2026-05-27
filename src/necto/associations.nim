@@ -24,28 +24,46 @@ proc buildInPlaceholders(n: int): seq[string] =
 
 # --- build_assoc helper ---
 
-template build_assoc*[Parent, Child](parent: Parent, childType: typedesc[Child], params: Table[string, string] = initTable[string, string]()): Changeset[Child] =
+template build_assoc*[Parent, Child](parent: Parent, childType: typedesc[Child], params: Table[string, string] = initTable[string, string](), assocName: string = ""): Changeset[Child] =
   ## Създава child changeset с попълнен foreign key към parent.
   ## Търси belongs_to в Child метаданните за правилен FK.
+  ## Ако assocName е зададено, търси точно асоциация с това име (поддържа множество
+  ## асоциации към една и съща таблица, напр. writer/reviewer към User).
   mixin schemaMeta, newChangeset, setFieldValRuntime, getFieldValRuntime
   block:
     let parentMeta = schemaMeta(Parent)
     let childMeta = schemaMeta(Child)
 
     var fkField = ""
-    for a in childMeta.associations:
-      if a.kind == akBelongsTo and a.targetSchema == $Parent:
-        fkField = a.foreignKey
-        break
-
-    if fkField.len == 0:
-      for a in parentMeta.associations:
-        if (a.kind == akHasMany or a.kind == akHasOne) and a.targetSchema == $Child:
+    if assocName.len > 0:
+      for a in childMeta.associations:
+        if a.name == assocName and a.kind == akBelongsTo and a.targetSchema == $Parent:
+          fkField = a.foreignKey
+          break
+      if fkField.len == 0:
+        for a in parentMeta.associations:
+          if a.name == assocName and (a.kind == akHasMany or a.kind == akHasOne) and a.targetSchema == $Child:
+            # Намери съответния belongs_to в Child за правилния FK
+            for ca in childMeta.associations:
+              if ca.kind == akBelongsTo and ca.targetSchema == $Parent:
+                fkField = ca.foreignKey
+                break
+            break
+    else:
+      for a in childMeta.associations:
+        if a.kind == akBelongsTo and a.targetSchema == $Parent:
           fkField = a.foreignKey
           break
 
+      if fkField.len == 0:
+        for a in parentMeta.associations:
+          if (a.kind == akHasMany or a.kind == akHasOne) and a.targetSchema == $Child:
+            fkField = a.foreignKey
+            break
+
     if fkField.len == 0:
-      raise newException(QueryError, "No association between " & $Parent & " and " & $Child)
+      raise newException(QueryError, "No association between " & $Parent & " and " & $Child &
+        (if assocName.len > 0: " with name '" & assocName & "'" else: ""))
 
     var child = Child()
     let pkVal = getFieldValRuntime(parent, parentMeta.primaryKeyField)

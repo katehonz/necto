@@ -38,6 +38,11 @@ proc newRepo*(adapter: Adapter; readAdapter: Adapter = nil): Repo =
 # --- Thread-local connection context (за транзакции) ---
 
 var threadLocalConn {.threadvar.}: Connection
+var savepointStack {.threadvar.}: seq[string]
+
+proc inTransaction*(repo: Repo): bool =
+  ## Връща true ако сме в транзакция.
+  threadLocalConn != nil
 
 proc getWriteConn*(repo: Repo): Connection =
   ## Взема write връзка. Ако сме в транзакция, връща същата връзка.
@@ -138,11 +143,15 @@ template one*[T](repo: Repo, q: Query[T]): Option[T] =
 
 template count*[T](repo: Repo, q: Query[T]): int64 =
   ## Връща брой редове.
+  ## Не работи с GROUP BY — при GROUP BY използвайте подзаявка или `repo.all` с агрегати.
   block:
     let conn = repo.getReadConn()
     let a = if repo.readAdapter != nil: repo.readAdapter else: repo.adapter
     try:
       var bq = q.toBoundQuery()
+      if bq.sql.find(" GROUP BY ") >= 0:
+        raise newException(QueryError,
+          "count() does not support GROUP BY. Use a subquery or aggregate select instead.")
       # Заменяме SELECT ... с SELECT COUNT(*)
       let fromIdx = bq.sql.find(" FROM ")
       let countSql = "SELECT COUNT(*)" & bq.sql[fromIdx..^1]
@@ -206,9 +215,8 @@ macro oneWithPreload*(repoArg: Repo, qArg: typed, preloads: varargs[string]): un
   # var q2 = q; q2 = q2.limit(1)
   let q2Ident = newIdentNode("q2")
   blockBody.add(newTree(nnkVarSection, newTree(nnkIdentDefs, q2Ident, newEmptyNode(), qArg)))
-  blockBody.add(newTree(nnkAsgn,
-    newTree(nnkDotExpr, q2Ident, newIdentNode("limit")),
-    newLit(1)))
+  blockBody.add(newTree(nnkAsgn, q2Ident,
+    newCall(newTree(nnkDotExpr, q2Ident, newIdentNode("limit")), newLit(1))))
 
   # var resSeq: seq[ParentType] = @[]
   blockBody.add(newTree(nnkVarSection, newTree(nnkIdentDefs, resSeqIdent,
@@ -226,7 +234,7 @@ macro oneWithPreload*(repoArg: Repo, qArg: typed, preloads: varargs[string]): un
   ifBody.add(preloadStmts)
   ifBody.add(newCall(newIdentNode("some"), newTree(nnkBracketExpr, resSeqIdent, newLit(0))))
 
-  let elseBody = newCall(newIdentNode("none"), parentType)
+  let elseBody = newCall(newTree(nnkBracketExpr, newIdentNode("none"), parentType))
 
   blockBody.add(newTree(nnkIfStmt,
     newTree(nnkElifBranch,
@@ -238,7 +246,27 @@ macro oneWithPreload*(repoArg: Repo, qArg: typed, preloads: varargs[string]): un
 
 # --- Write Helpers (вземат SchemaMeta като параметър; cs е auto за избягване на generic bound) ---
 
-proc buildInsertSql(cs: auto, meta: SchemaMeta): (string, seq[string]) =
+type
+  OnConflictKind* = enum
+    ocNone,        ## Без ON CONFLICT
+    ocDoNothing,   ## ON CONFLICT DO NOTHING
+    ocDoUpdate     ## ON CONFLICT DO UPDATE SET ...
+
+  OnConflict* = object
+    kind*: OnConflictKind
+    conflictTarget*: string        ## Колона(и) за conflict, напр. "id" или "id, email"
+    updateFields*: seq[string]     ## Полета за UPDATE при ocDoUpdate (празно = всички)
+
+proc doNothing*(): OnConflict =
+  ## Създава ON CONFLICT DO NOTHING.
+  OnConflict(kind: ocDoNothing)
+
+proc doUpdate*(conflictTarget: string; fields: seq[string] = @[]): OnConflict =
+  ## Създава ON CONFLICT (target) DO UPDATE SET fields...
+  ## Ако fields е празно, обновяват се всички полета (без PK и timestamps).
+  OnConflict(kind: ocDoUpdate, conflictTarget: conflictTarget, updateFields: fields)
+
+proc buildInsertSql(cs: auto, meta: SchemaMeta; onConflict: OnConflict = OnConflict(kind: ocNone)): (string, seq[string]) =
   ## Генерира INSERT SQL от changeset и schema metadata.
   var columns: seq[string] = @[]
   var placeholders: seq[string] = @[]
@@ -273,8 +301,37 @@ proc buildInsertSql(cs: auto, meta: SchemaMeta): (string, seq[string]) =
       values.add(nowStr)
       inc idx
 
-  let sql = "INSERT INTO \"" & meta.tableName & "\" (" &
+  var sql = "INSERT INTO \"" & meta.tableName & "\" (" &
             columns.join(", ") & ") VALUES (" & placeholders.join(", ") & ")"
+
+  # --- ON CONFLICT ---
+  if onConflict.kind == ocDoNothing:
+    if onConflict.conflictTarget.len > 0:
+      sql.add(" ON CONFLICT (" & onConflict.conflictTarget & ") DO NOTHING")
+    else:
+      sql.add(" ON CONFLICT DO NOTHING")
+  elif onConflict.kind == ocDoUpdate:
+    let target = if onConflict.conflictTarget.len > 0: onConflict.conflictTarget else: meta.primaryKeyField
+    sql.add(" ON CONFLICT (" & target & ") DO UPDATE SET ")
+    var updates: seq[string] = @[]
+    for f in meta.fields:
+      if f.primaryKey or f.virtual:
+        continue
+      if onConflict.updateFields.len > 0 and f.name notin onConflict.updateFields:
+        continue
+      if f.isTimestamp and f.name == "updated_at":
+        updates.add("\"" & f.dbColumn & "\" = EXCLUDED.\"" & f.dbColumn & "\"")
+      elif cs.changes.hasKey(f.name) or f.isTimestamp:
+        updates.add("\"" & f.dbColumn & "\" = EXCLUDED.\"" & f.dbColumn & "\"")
+    if updates.len == 0:
+      # Fallback: update всички non-PK колони от changes
+      for key, val in cs.changes.pairs():
+        for f in meta.fields:
+          if f.name == key and not f.primaryKey and not f.virtual:
+            updates.add("\"" & f.dbColumn & "\" = EXCLUDED.\"" & f.dbColumn & "\"")
+            break
+    sql.add(updates.join(", "))
+
   result = (sql, values)
 
 template buildUpdateSql(cs: auto, meta: SchemaMeta): (string, seq[string]) =
@@ -408,6 +465,82 @@ template insert*[T](repo: Repo, cs: Changeset[T]): T =
         load(rows[0], T)
       else:
         cs.data
+    except DatabaseError as e:
+      var cs2 = cs
+      handleConstraintError(cs2, e.msg)
+      if cs2.isInvalid():
+        var ce = new(ConstraintError)
+        ce.msg = e.msg
+        ce.constraintName = ""
+        raise ce
+      raise
+    finally:
+      repo.releaseConn(conn, repo.adapter)
+
+template insert*[T](repo: Repo, cs: Changeset[T], onConflict: OnConflict): T =
+  ## Вмъква запис с ON CONFLICT обработка.
+  ## `onConflict` може да е `doNothing()` или `doUpdate("id", @["name", "email"])`.
+  mixin schemaMeta, load
+  block:
+    if cs.isInvalid():
+      raise newException(ValidationError, "Cannot insert invalid changeset")
+    let conn = repo.getWriteConn()
+    try:
+      let meta = schemaMeta(T)
+      let (sql, args) = buildInsertSql(cs, meta, onConflict)
+      var pkVal = ""
+      for f in meta.fields:
+        if f.primaryKey:
+          if cs.changes.hasKey(f.name):
+            pkVal = cs.changes[f.name]
+          else:
+            try:
+              pkVal = getFieldValRuntime(cs.data, f.name)
+            except:
+              discard
+          break
+      var hasRealPk = pkVal.len > 0
+      if hasRealPk:
+        # Проверяваме дали PK е валиден (не default стойност като "0")
+        for f in meta.fields:
+          if f.primaryKey and (f.nimType == "int64" or f.nimType == "int" or f.nimType == "int16"):
+            try:
+              if parseBiggestInt(pkVal) <= 0:
+                hasRealPk = false
+            except ValueError:
+              discard
+            break
+      if hasRealPk:
+        # При upsert знаем PK и можем да load-нем директно
+        repo.adapter.exec(conn, sql, args)
+        let loadSql = "SELECT * FROM \"" & meta.tableName &
+                      "\" WHERE \"" & meta.primaryKeyField & "\" = $1"
+        let rows = repo.adapter.query(conn, loadSql, @[pkVal])
+        if rows.len > 0:
+          load(rows[0], T)
+        else:
+          cs.data
+      else:
+        # Не знаем PK - използваме insertReturning
+        var newId: int64 = 0
+        try:
+          newId = repo.adapter.insertReturning(conn, sql, meta.primaryKeyField, args)
+        except DatabaseError as e:
+          if onConflict.kind == ocDoNothing and e.msg.contains("no rows returned"):
+            # DO NOTHING — връщаме nil/pointer който извикващият трябва да обработи
+            newId = 0
+          else:
+            raise
+        if newId > 0:
+          let loadSql = "SELECT * FROM \"" & meta.tableName &
+                        "\" WHERE \"" & meta.primaryKeyField & "\" = $1"
+          let rows = repo.adapter.query(conn, loadSql, @[$newId])
+          if rows.len > 0:
+            load(rows[0], T)
+          else:
+            cs.data
+        else:
+          cs.data
     except DatabaseError as e:
       var cs2 = cs
       handleConstraintError(cs2, e.msg)
@@ -777,11 +910,19 @@ proc transaction*(repo: Repo, body: proc()) =
   ## Всички repo операции вътре в body ползват една и съща връзка.
   let conn = repo.adapter.connect()
   let prevConn = threadLocalConn
+  let prevStack = savepointStack
   threadLocalConn = conn
+  savepointStack = @[]
   try:
     repo.adapter.beginTransaction(conn)
     body()
     repo.adapter.commitTransaction(conn)
+  except RollbackError:
+    # Graceful manual rollback — не re-raise-ваме
+    try:
+      repo.adapter.rollbackTransaction(conn)
+    except:
+      discard
   except:
     try:
       repo.adapter.rollbackTransaction(conn)
@@ -790,7 +931,43 @@ proc transaction*(repo: Repo, body: proc()) =
     raise
   finally:
     threadLocalConn = prevConn
+    savepointStack = prevStack
     repo.adapter.disconnect(conn)
+
+template savepoint*(repo: Repo, name: string, body: untyped): untyped =
+  ## Изпълнява блок в PostgreSQL SAVEPOINT.
+  ## Ако body хвърли изключение, rollback-ва до този savepoint.
+  block:
+    if threadLocalConn == nil:
+      raise newException(QueryError, "savepoint requires an active transaction")
+    repo.adapter.savepoint(threadLocalConn, name)
+    savepointStack.add(name)
+    try:
+      body
+      # Не release-ваме savepoint - при COMMIT се release-ват автоматично
+    except:
+      repo.adapter.rollbackToSavepoint(threadLocalConn, name)
+      # Премахваме този savepoint и всички след него от стека
+      while savepointStack.len > 0 and savepointStack[^1] != name:
+        discard savepointStack.pop()
+      if savepointStack.len > 0 and savepointStack[^1] == name:
+        discard savepointStack.pop()
+      raise
+
+template rollbackTo*(repo: Repo, name: string): untyped =
+  ## Rollback до named savepoint.
+  if threadLocalConn == nil:
+    raise newException(QueryError, "rollbackTo requires an active transaction")
+  repo.adapter.rollbackToSavepoint(threadLocalConn, name)
+  while savepointStack.len > 0 and savepointStack[^1] != name:
+    discard savepointStack.pop()
+  if savepointStack.len > 0 and savepointStack[^1] == name:
+    discard savepointStack.pop()
+
+proc rollback*(repo: Repo) =
+  ## Graceful rollback на текущата транзакция.
+  ## Хвърля RollbackError който transaction() хваща и изпълнява ROLLBACK.
+  raise newException(RollbackError, "Transaction rolled back manually")
 
 # --- Макро за дефиниране на Repo ---
 
