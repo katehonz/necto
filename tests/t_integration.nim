@@ -94,12 +94,12 @@ suite "Integration: Schema + Query + Changeset + CRUD":
       discard testrepoInstance.insert(cs)
 
     let total = testrepoInstance.count(fromSchema(User))
-    check(total == 3)
+    check(total.total == 3)
 
     let filtered = testrepoInstance.count(
       fromSchema(User).where("name", Eq, "A")
     )
-    check(filtered == 1)
+    check(filtered.total == 1)
 
   test "Update via changeset":
     var cs = newChangeset(newUser(), {"name": "Old", "email": "old@test.com"}.toTable)

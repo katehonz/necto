@@ -69,3 +69,5 @@ tests/t_auth
 tests/t_cte
 tests/t_tenant
 src/necto/auth
+tests/t_fts
+tests/t_subqueries

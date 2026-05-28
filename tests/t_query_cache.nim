@@ -119,12 +119,13 @@ suite "Compiled Query Cache":
     let bq = q.toBoundQuery()
     check(bq.sql.find("AND") >= 0)
 
-  test "count() with GROUP BY raises QueryError":
-    var raised = false
-    try:
-      discard testrepoInstance.count(
-        fromSchema(CqUser).groupBy("active")
-      )
-    except QueryError:
-      raised = true
-    check(raised)
+  test "count() with GROUP BY returns seq of tuples":
+    let result = testrepoInstance.count(
+      fromSchema(CqUser).groupBy("age")
+    )
+    check(result.hasGroups == true)
+    check(result.groups.len == 10)
+    var total = 0'i64
+    for g in result.groups:
+      total += g[1]
+    check(total == 10)

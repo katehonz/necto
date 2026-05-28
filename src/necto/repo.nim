@@ -151,25 +151,53 @@ template one*[T](repo: Repo, q: Query[T]): Option[T] =
     finally:
       repo.releaseConn(conn, a)
 
-template count*[T](repo: Repo, q: Query[T]): int64 =
+type
+  CountResult* = object
+    ## Резултат от repo.count().
+    ## Ако заявката има GROUP BY, `groups` съдържа данните.
+    ## Иначе `total` съдържа скаларния брой.
+    case hasGroups*: bool
+    of true:
+      groups*: seq[(string, int64)]
+    of false:
+      total*: int64
+
+# --- Query API (templates за lazy resolution на load/schemaMeta) ---
+
+template count*[T](repo: Repo, q: Query[T]): CountResult =
   ## Връща брой редове.
-  ## Не работи с GROUP BY — при GROUP BY използвайте подзаявка или `repo.all` с агрегати.
+  ## Ако заявката има GROUP BY, връща CountResult с `hasGroups = true` и `groups`.
+  ## Иначе връща CountResult с `hasGroups = false` и `total`.
   block:
     let conn = repo.getReadConn()
     let a = if repo.readAdapter != nil: repo.readAdapter else: repo.adapter
     try:
-      var bq = q.toBoundQuery()
-      if bq.sql.find(" GROUP BY ") >= 0:
-        raise newException(QueryError,
-          "count() does not support GROUP BY. Use a subquery or aggregate select instead.")
-      # Заменяме SELECT ... с SELECT COUNT(*)
-      let fromIdx = bq.sql.find(" FROM ")
-      let countSql = "SELECT COUNT(*)" & bq.sql[fromIdx..^1]
-      let val = a.scalar(conn, countSql, bq.args)
-      if val.len > 0:
-        parseBiggestInt(val)
+      if q.groupByFields.len > 0:
+        # Групиран count — връщаме seq[(string, int64)]
+        var bq = q.toBoundQuery()
+        var selectParts: seq[string] = @[]
+        for f in q.groupByFields:
+          selectParts.add("\"" & f & "\"")
+        selectParts.add("COUNT(*)")
+        let fromIdx = bq.sql.find(" FROM ")
+        let countSql = "SELECT " & selectParts.join(", ") & bq.sql[fromIdx..^1]
+        let rows = a.query(conn, countSql, bq.args)
+        var res: seq[(string, int64)] = @[]
+        for row in rows:
+          let groupVal = if row.len > 2: row[0..^2].join(", ") else: row[0]
+          let countVal = parseBiggestInt(row[^1])
+          res.add((groupVal, countVal))
+        CountResult(hasGroups: true, groups: res)
       else:
-        0'i64
+        var bq = q.toBoundQuery()
+        # Заменяме SELECT ... с SELECT COUNT(*)
+        let fromIdx = bq.sql.find(" FROM ")
+        let countSql = "SELECT COUNT(*)" & bq.sql[fromIdx..^1]
+        let val = a.scalar(conn, countSql, bq.args)
+        if val.len > 0:
+          CountResult(hasGroups: false, total: parseBiggestInt(val))
+        else:
+          CountResult(hasGroups: false, total: 0'i64)
     finally:
       repo.releaseConn(conn, a)
 
