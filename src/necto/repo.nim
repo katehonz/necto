@@ -177,7 +177,7 @@ template count*[T](repo: Repo, q: Query[T]): CountResult =
         var bq = q.toBoundQuery()
         var selectParts: seq[string] = @[]
         for f in q.groupByFields:
-          selectParts.add("\"" & f & "\"")
+          selectParts.add(quoteIdentifier(f))
         selectParts.add("COUNT(*)")
         let fromIdx = bq.sql.find(" FROM ")
         let countSql = "SELECT " & selectParts.join(", ") & bq.sql[fromIdx..^1]
@@ -264,7 +264,7 @@ template stream*[T](repo: Repo, q: Query[T], batchSz: int = 100): StreamIterator
 
     try:
       a.beginTransaction(conn)
-      let cursorSql = "DECLARE \"" & iter.cursorName & "\" CURSOR FOR " & iter.bq.sql
+      let cursorSql = "DECLARE " & quoteIdentifier(iter.cursorName) & " CURSOR FOR " & iter.bq.sql
       a.exec(conn, cursorSql, iter.bq.args)
     except:
       repo.releaseConn(conn, a)
@@ -277,7 +277,7 @@ proc close*[T](it: var StreamIterator[T]) =
   if it.conn == nil:
     return
   try:
-    it.adapter.exec(it.conn, "CLOSE \"" & it.cursorName & "\"")
+    it.adapter.exec(it.conn, "CLOSE " & quoteIdentifier(it.cursorName))
     it.adapter.commitTransaction(it.conn)
   except:
     discard
@@ -425,7 +425,7 @@ proc buildInsertSql(cs: auto, meta: SchemaMeta; onConflict: OnConflict = OnConfl
         break
     if f.virtual:
       continue
-    columns.add("\"" & f.dbColumn & "\"")
+    columns.add(quoteIdentifier(f.dbColumn))
     placeholders.add("$" & $idx)
     values.add(val)
     inc idx
@@ -433,23 +433,23 @@ proc buildInsertSql(cs: auto, meta: SchemaMeta; onConflict: OnConflict = OnConfl
   for f in meta.fields:
     if f.isTimestamp and not cs.changes.hasKey(f.name):
       let nowStr = dumpValue(now())
-      columns.add("\"" & f.dbColumn & "\"")
+      columns.add(quoteIdentifier(f.dbColumn))
       placeholders.add("$" & $idx)
       values.add(nowStr)
       inc idx
 
-  var sql = "INSERT INTO \"" & meta.tableName & "\" (" &
+  var sql = "INSERT INTO " & quoteIdentifier(meta.tableName) & " (" &
             columns.join(", ") & ") VALUES (" & placeholders.join(", ") & ")"
 
   # --- ON CONFLICT ---
   if onConflict.kind == ocDoNothing:
     if onConflict.conflictTarget.len > 0:
-      sql.add(" ON CONFLICT (" & onConflict.conflictTarget & ") DO NOTHING")
+      sql.add(" ON CONFLICT (" & quoteIdentifier(onConflict.conflictTarget) & ") DO NOTHING")
     else:
       sql.add(" ON CONFLICT DO NOTHING")
   elif onConflict.kind == ocDoUpdate:
     let target = if onConflict.conflictTarget.len > 0: onConflict.conflictTarget else: meta.primaryKeyField
-    sql.add(" ON CONFLICT (" & target & ") DO UPDATE SET ")
+    sql.add(" ON CONFLICT (" & quoteIdentifier(target) & ") DO UPDATE SET ")
     var updates: seq[string] = @[]
     for f in meta.fields:
       if f.primaryKey or f.virtual:
@@ -457,15 +457,15 @@ proc buildInsertSql(cs: auto, meta: SchemaMeta; onConflict: OnConflict = OnConfl
       if onConflict.updateFields.len > 0 and f.name notin onConflict.updateFields:
         continue
       if f.isTimestamp and f.name == "updated_at":
-        updates.add("\"" & f.dbColumn & "\" = EXCLUDED.\"" & f.dbColumn & "\"")
+        updates.add(quoteIdentifier(f.dbColumn) & " = EXCLUDED." & quoteIdentifier(f.dbColumn))
       elif cs.changes.hasKey(f.name) or f.isTimestamp:
-        updates.add("\"" & f.dbColumn & "\" = EXCLUDED.\"" & f.dbColumn & "\"")
+        updates.add(quoteIdentifier(f.dbColumn) & " = EXCLUDED." & quoteIdentifier(f.dbColumn))
     if updates.len == 0:
       # Fallback: update всички non-PK колони от changes
       for key, val in cs.changes.pairs():
         for f in meta.fields:
           if f.name == key and not f.primaryKey and not f.virtual:
-            updates.add("\"" & f.dbColumn & "\" = EXCLUDED.\"" & f.dbColumn & "\"")
+            updates.add(quoteIdentifier(f.dbColumn) & " = EXCLUDED." & quoteIdentifier(f.dbColumn))
             break
     sql.add(updates.join(", "))
 
@@ -490,14 +490,14 @@ template buildUpdateSql(cs: auto, meta: SchemaMeta): (string, seq[string]) =
           break
       if not found or f.virtual or f.primaryKey:
         continue
-      sets.add("\"" & f.dbColumn & "\" = $" & $idx)
+      sets.add(quoteIdentifier(f.dbColumn) & " = $" & $idx)
       values.add(val)
       inc idx
 
     for f in meta.fields:
       if f.isTimestamp and f.name == "updated_at" and not cs.changes.hasKey(f.name):
         let nowStr = dumpValue(now())
-        sets.add("\"" & f.dbColumn & "\" = $" & $idx)
+        sets.add(quoteIdentifier(f.dbColumn) & " = $" & $idx)
         values.add(nowStr)
         inc idx
 
@@ -526,8 +526,8 @@ template buildUpdateSql(cs: auto, meta: SchemaMeta): (string, seq[string]) =
       ("", @[])
     else:
       values.add(pkVal)
-      let whereClause = "\"" & meta.primaryKeyField & "\" = $" & $idx
-      let sql = "UPDATE \"" & meta.tableName & "\" SET " &
+      let whereClause = quoteIdentifier(meta.primaryKeyField) & " = $" & $idx
+      let sql = "UPDATE " & quoteIdentifier(meta.tableName) & " SET " &
                 sets.join(", ") & " WHERE " & whereClause
       (sql, values)
 
@@ -543,8 +543,8 @@ proc buildDeleteSql(cs: auto, meta: SchemaMeta): (string, seq[string]) =
   if pkVal.len == 0:
     raise newException(ValidationError, "Cannot delete without primary key value")
 
-  let sql = "DELETE FROM \"" & meta.tableName & "\" WHERE \"" &
-            meta.primaryKeyField & "\" = $1"
+  let sql = "DELETE FROM " & quoteIdentifier(meta.tableName) & " WHERE " &
+            quoteIdentifier(meta.primaryKeyField) & " = $1"
   result = (sql, @[pkVal])
 
 proc buildSoftDeleteSql(cs: auto, meta: SchemaMeta): (string, seq[string]) =
@@ -559,8 +559,8 @@ proc buildSoftDeleteSql(cs: auto, meta: SchemaMeta): (string, seq[string]) =
   if pkVal.len == 0:
     raise newException(ValidationError, "Cannot soft-delete without primary key value")
 
-  let sql = "UPDATE \"" & meta.tableName & "\" SET \"deleted_at\" = NOW() WHERE \"" &
-            meta.primaryKeyField & "\" = $1 AND \"deleted_at\" IS NULL"
+  let sql = "UPDATE " & quoteIdentifier(meta.tableName) & " SET " & quoteIdentifier("deleted_at") & " = NOW() WHERE " &
+            quoteIdentifier(meta.primaryKeyField) & " = $1 AND " & quoteIdentifier("deleted_at") & " IS NULL"
   result = (sql, @[pkVal])
 
 # --- Constraint Error Handling (Ecto pattern) ---
@@ -611,8 +611,8 @@ template insert*[T](repo: Repo, cs: Changeset[T]): T =
       let meta = schemaMeta(T)
       let (sql, args) = buildInsertSql(cs, meta)
       let newId = repo.adapter.insertReturning(conn, sql, meta.primaryKeyField, args)
-      let loadSql = "SELECT * FROM \"" & meta.tableName &
-                    "\" WHERE \"" & meta.primaryKeyField & "\" = $1"
+      let loadSql = "SELECT * FROM " & quoteIdentifier(meta.tableName) &
+                    " WHERE " & quoteIdentifier(meta.primaryKeyField) & " = $1"
       let rows = repo.adapter.query(conn, loadSql, @[$newId])
       if rows.len > 0:
         load(rows[0], T)
@@ -666,8 +666,8 @@ template insert*[T](repo: Repo, cs: Changeset[T], onConflict: OnConflict): T =
       if hasRealPk:
         # При upsert знаем PK и можем да load-нем директно
         repo.adapter.exec(conn, sql, args)
-        let loadSql = "SELECT * FROM \"" & meta.tableName &
-                      "\" WHERE \"" & meta.primaryKeyField & "\" = $1"
+        let loadSql = "SELECT * FROM " & quoteIdentifier(meta.tableName) &
+                      " WHERE " & quoteIdentifier(meta.primaryKeyField) & " = $1"
         let rows = repo.adapter.query(conn, loadSql, @[pkVal])
         if rows.len > 0:
           load(rows[0], T)
@@ -685,8 +685,8 @@ template insert*[T](repo: Repo, cs: Changeset[T], onConflict: OnConflict): T =
           else:
             raise
         if newId > 0:
-          let loadSql = "SELECT * FROM \"" & meta.tableName &
-                        "\" WHERE \"" & meta.primaryKeyField & "\" = $1"
+          let loadSql = "SELECT * FROM " & quoteIdentifier(meta.tableName) &
+                        " WHERE " & quoteIdentifier(meta.primaryKeyField) & " = $1"
           let rows = repo.adapter.query(conn, loadSql, @[$newId])
           if rows.len > 0:
             load(rows[0], T)
@@ -743,7 +743,7 @@ template insert_all*(repo: Repo, changesets: auto): auto =
           if not fieldKnown or f.virtual:
             continue
           orderedFields.add((key, f))
-          columns.add("\"" & f.dbColumn & "\"")
+          columns.add(quoteIdentifier(f.dbColumn))
 
         # Sort by field name for deterministic ordering
         orderedFields.sort do (a, b: (string, FieldMeta)) -> int:
@@ -752,13 +752,13 @@ template insert_all*(repo: Repo, changesets: auto): auto =
         # Rebuild columns from sorted order
         columns = @[]
         for pair in orderedFields:
-          columns.add("\"" & pair[1].dbColumn & "\"")
+          columns.add(quoteIdentifier(pair[1].dbColumn))
 
         var timestampCols: seq[FieldMeta] = @[]
         for f in meta.fields:
           if f.isTimestamp and not firstCs.changes.hasKey(f.name):
             timestampCols.add(f)
-            columns.add("\"" & f.dbColumn & "\"")
+            columns.add(quoteIdentifier(f.dbColumn))
 
         # Build a set of valid fields from firstCs for quick lookup
         var validFields: seq[string] = @[]
@@ -783,7 +783,7 @@ template insert_all*(repo: Repo, changesets: auto): auto =
             inc idx
           rowGroups.add("(" & rowPlaceholders.join(", ") & ")")
 
-        let sql = "INSERT INTO \"" & meta.tableName & "\" (" &
+        let sql = "INSERT INTO " & quoteIdentifier(meta.tableName) & " (" &
                   columns.join(", ") & ") VALUES " &
                   rowGroups.join(", ") & " RETURNING *"
         # --------------------------------------
@@ -831,7 +831,7 @@ template insert_all*[T](repo: Repo, typ: typedesc[T], entries: seq[Table[string,
         # Строим колоните
         var columns: seq[string] = @[]
         for f in validFields:
-          columns.add("\"" & f.dbColumn & "\"")
+          columns.add(quoteIdentifier(f.dbColumn))
 
         var allValues: seq[string] = @[]
         var idx = 1
@@ -847,7 +847,7 @@ template insert_all*[T](repo: Repo, typ: typedesc[T], entries: seq[Table[string,
             inc idx
           rowGroups.add("(" & rowPlaceholders.join(", ") & ")")
 
-        let sql = "INSERT INTO \"" & meta.tableName & "\" (" &
+        let sql = "INSERT INTO " & quoteIdentifier(meta.tableName) & " (" &
                   columns.join(", ") & ") VALUES " &
                   rowGroups.join(", ") & " RETURNING *"
 
@@ -904,14 +904,14 @@ template update_all*[T](repo: Repo, q: Query[T], changes: Table[string, string])
             break
         if not found or f.virtual or f.primaryKey:
           continue
-        sets.add("\"" & f.dbColumn & "\" = $" & $idx)
+        sets.add(quoteIdentifier(f.dbColumn) & " = $" & $idx)
         values.add(val)
         inc idx
 
       # Автоматичен updated_at
       for f in meta.fields:
         if f.isTimestamp and f.name == "updated_at":
-          sets.add("\"" & f.dbColumn & "\" = $" & $idx)
+          sets.add(quoteIdentifier(f.dbColumn) & " = $" & $idx)
           values.add(dumpValue(now()))
           inc idx
           break
@@ -924,7 +924,7 @@ template update_all*[T](repo: Repo, q: Query[T], changes: Table[string, string])
       if tablePart.startsWith("\"") and tablePart.endsWith("\""):
         tablePart = tablePart[1 ..< tablePart.len - 1]
       
-      var sql = "UPDATE \"" & tablePart & "\" SET " & sets.join(", ")
+      var sql = "UPDATE " & quoteIdentifier(tablePart) & " SET " & sets.join(", ")
       if whereIdx >= 0:
         let whereSql = renumberPlaceholders(bq.sql[whereIdx..^1], idx - 1)
         sql.add(" " & whereSql)
@@ -951,7 +951,7 @@ template delete_all*[T](repo: Repo, q: Query[T]): int64 =
       if tablePart.startsWith("\"") and tablePart.endsWith("\""):
         tablePart = tablePart[1 ..< tablePart.len - 1]
       
-      var sql = "DELETE FROM \"" & tablePart & "\""
+      var sql = "DELETE FROM " & quoteIdentifier(tablePart)
       var args: seq[string] = @[]
       if whereIdx >= 0:
         sql.add(" " & bq.sql[whereIdx..^1])
@@ -984,8 +984,8 @@ template update*[T](repo: Repo, cs: Changeset[T]): T =
                 pkVal = cs.changes[f.name]
             break
         if pkVal.len > 0:
-          let loadSql = "SELECT * FROM \"" & meta.tableName &
-                        "\" WHERE \"" & meta.primaryKeyField & "\" = $1"
+          let loadSql = "SELECT * FROM " & quoteIdentifier(meta.tableName) &
+                        " WHERE " & quoteIdentifier(meta.primaryKeyField) & " = $1"
           let rows = repo.adapter.query(conn, loadSql, @[pkVal])
           if rows.len > 0:
             load(rows[0], T)
@@ -1009,8 +1009,8 @@ template update*[T](repo: Repo, cs: Changeset[T]): T =
               except:
                 discard
               break
-        let loadSql = "SELECT * FROM \"" & meta.tableName &
-                      "\" WHERE \"" & meta.primaryKeyField & "\" = $1"
+        let loadSql = "SELECT * FROM " & quoteIdentifier(meta.tableName) &
+                      " WHERE " & quoteIdentifier(meta.primaryKeyField) & " = $1"
         let rows = repo.adapter.query(conn, loadSql, @[pkVal])
         if rows.len > 0:
           load(rows[0], T)

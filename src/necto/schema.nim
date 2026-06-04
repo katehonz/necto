@@ -20,6 +20,11 @@ import ./adapters/base
 
 export type_system, base, times
 
+proc quoteIdentifier*(ident: string): string =
+  ## PostgreSQL identifier quoting: wraps in double quotes and escapes inner quotes.
+  ## This prevents SQL injection via table/column names.
+  "\"" & ident.replace("\"", "\"\"") & "\""
+
 # --- Schema Metadata ---
 
 type

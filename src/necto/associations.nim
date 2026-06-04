@@ -108,8 +108,8 @@ template preloadBelongsTo*[Parent, Child](repo: Repo, parents: seq[Parent]): Tab
 
     if fkValues.len > 0:
       let placeholders = buildInPlaceholders(fkValues.len)
-      let sql = "SELECT * FROM \"" & childMeta.tableName &
-                "\" WHERE \"" & assoc.ownerKey & "\" IN (" & placeholders.join(", ") & ")"
+      let sql = "SELECT * FROM " & quoteIdentifier(childMeta.tableName) &
+                " WHERE " & quoteIdentifier(assoc.ownerKey) & " IN (" & placeholders.join(", ") & ")"
 
       let conn = repo.getReadConn()
       let a = if repo.readAdapter != nil: repo.readAdapter else: repo.adapter
@@ -169,8 +169,8 @@ template preloadHasMany*[Parent, Child](repo: Repo, parents: seq[Parent]): Table
 
     if pkValues.len > 0:
       let placeholders = buildInPlaceholders(pkValues.len)
-      let sql = "SELECT * FROM \"" & childMeta.tableName &
-                "\" WHERE \"" & fkField & "\" IN (" & placeholders.join(", ") & ")"
+      let sql = "SELECT * FROM " & quoteIdentifier(childMeta.tableName) &
+                " WHERE " & quoteIdentifier(fkField) & " IN (" & placeholders.join(", ") & ")"
 
       let conn = repo.getReadConn()
       let a = if repo.readAdapter != nil: repo.readAdapter else: repo.adapter
@@ -214,10 +214,10 @@ template preloadManyToMany*[Parent, Child](repo: Repo, parents: seq[Parent], joi
 
     if pkValues.len > 0:
       let placeholders = buildInPlaceholders(pkValues.len)
-      let sql = "SELECT \"" & childMeta.tableName & "\".*, j.\"" & parentFk & "\" as __parent_id__ " &
-                "FROM \"" & childMeta.tableName & "\" INNER JOIN \"" & joinTable & "\" j " &
-                "ON \"" & childMeta.tableName & "\".\"" & childMeta.primaryKeyField & "\" = j.\"" & childFk & "\" " &
-                "WHERE j.\"" & parentFk & "\" IN (" & placeholders.join(", ") & ")"
+      let sql = "SELECT " & quoteIdentifier(childMeta.tableName) & ".*, j." & quoteIdentifier(parentFk) & " as __parent_id__ " &
+                "FROM " & quoteIdentifier(childMeta.tableName) & " INNER JOIN " & quoteIdentifier(joinTable) & " j " &
+                "ON " & quoteIdentifier(childMeta.tableName) & "." & quoteIdentifier(childMeta.primaryKeyField) & " = j." & quoteIdentifier(childFk) & " " &
+                "WHERE j." & quoteIdentifier(parentFk) & " IN (" & placeholders.join(", ") & ")"
 
       let conn = repo.getReadConn()
       let a = if repo.readAdapter != nil: repo.readAdapter else: repo.adapter
@@ -282,8 +282,8 @@ template preloadHasOne*[Parent, Child](repo: Repo, parents: seq[Parent]): Table[
 
     if pkValues.len > 0:
       let placeholders = buildInPlaceholders(pkValues.len)
-      let sql = "SELECT * FROM \"" & childMeta.tableName &
-                "\" WHERE \"" & fkField & "\" IN (" & placeholders.join(", ") & ")"
+      let sql = "SELECT * FROM " & quoteIdentifier(childMeta.tableName) &
+                " WHERE " & quoteIdentifier(fkField) & " IN (" & placeholders.join(", ") & ")"
 
       let conn = repo.getReadConn()
       let a = if repo.readAdapter != nil: repo.readAdapter else: repo.adapter

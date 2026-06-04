@@ -1,5 +1,6 @@
 # Necto — Архитектурен план v2.0
 
+> **Забележка:** Този документ е исторически архитектурен план. За актуална документация вижте [`ROADMAP.md`](./ROADMAP.md) и [`docs/`](./docs/).  
 > Версия: 0.2.0  
 > Дата: 2026-05-26  
 > Цел: PostgreSQL-first ORM за Nim 2.x, вдъхновен от Ecto (Elixir) и Avram (Crystal).  
@@ -42,11 +43,10 @@ necto/
 │       ├── schema.nim               # `necto_schema` макро, reflection, row loader
 │       ├── changeset.nim            # Changeset тип, cast, валидации, constraints
 │       ├── query.nim                # Query AST структура
-│       ├── query_builder.nim        # SQL генератор с parameter binding
-│       ├── query_dsl.nim            # Type-safe макроси: `where`, `select`, `order_by`
+│       ├── query.nim                # Query DSL, SQL генератор с parameter binding, type-safe макроси
 │       ├── type_system.nim          # Cast/Load/Dump, custom types, enums
 │       ├── associations.nim         # HasMany, BelongsTo, HasOne метаданни
-│       ├── preloader.nim            # Batch preload (N+1 safe), typedesc dispatch
+│       ├── associations.nim         # Batch preload (N+1 safe), HasMany, BelongsTo, HasOne метаданни
 │       ├── migration.nim            # Migration DSL + SQL генератори
 │       ├── migrator.nim             # Runner, версиониране, CLI hooks
 │       ├── schema_verifier.nim      # Compile-time проверка на схема срещу БД

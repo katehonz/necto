@@ -9,7 +9,7 @@
 ##     .limit(10)
 ##     .select("id", "name")
 
-import std/[macros, strutils, options, tables, sequtils]
+import std/[macros, strutils, options, tables, sequtils, re]
 import ./schema
 
 export schema
@@ -107,7 +107,7 @@ proc select*[T](q: Query[T], fields: varargs[string]): Query[T] =
   result = q
   result.selectFields = @[]
   for f in fields:
-    let qf = if f.contains(".") or f.contains("(") or f.contains("#") or f.contains("@") or f.contains("?"): f else: "\"" & f & "\""
+    let qf = if f.contains(".") or f.contains("(") or f.contains("#") or f.contains("@") or f.contains("?"): f else: quoteIdentifier(f)
     result.selectFields.add(qf)
 
 proc where*[T](q: Query[T], field: string, op: WhereOp, value: string): Query[T] =
@@ -243,10 +243,10 @@ proc buildOverClause(partitionBy: openArray[string], orderByField: string, order
   ## Генерира OVER() SQL клауза.
   var parts: seq[string] = @[]
   if partitionBy.len > 0:
-    parts.add("PARTITION BY " & partitionBy.mapIt("\"" & it & "\"").join(", "))
+    parts.add("PARTITION BY " & partitionBy.mapIt(quoteIdentifier(it)).join(", "))
   if orderByField.len > 0:
     let dirStr = if orderDir == Asc: "ASC" else: "DESC"
-    parts.add("ORDER BY \"" & orderByField & "\" " & dirStr)
+    parts.add("ORDER BY " & quoteIdentifier(orderByField) & " " & dirStr)
   result = "OVER (" & parts.join(" ") & ")"
 
 proc rowNumber*[T](q: Query[T], partitionBy: openArray[string] = [],
@@ -256,7 +256,7 @@ proc rowNumber*[T](q: Query[T], partitionBy: openArray[string] = [],
   ## Пример: q.rowNumber(partitionBy = ["dept"], orderByField = "salary", orderDir = Desc)
   result = q
   let over = buildOverClause(partitionBy, orderByField, orderDir)
-  result.windowFunctions.add("ROW_NUMBER() " & over & " AS \"" & alias & "\"")
+  result.windowFunctions.add("ROW_NUMBER() " & over & " AS " & quoteIdentifier(alias))
 
 proc rank*[T](q: Query[T], partitionBy: openArray[string] = [],
               orderByField: string = "", orderDir: OrderDirection = Asc,
@@ -264,7 +264,7 @@ proc rank*[T](q: Query[T], partitionBy: openArray[string] = [],
   ## Добавя RANK() window function.
   result = q
   let over = buildOverClause(partitionBy, orderByField, orderDir)
-  result.windowFunctions.add("RANK() " & over & " AS \"" & alias & "\"")
+  result.windowFunctions.add("RANK() " & over & " AS " & quoteIdentifier(alias))
 
 proc denseRank*[T](q: Query[T], partitionBy: openArray[string] = [],
                    orderByField: string = "", orderDir: OrderDirection = Asc,
@@ -272,7 +272,7 @@ proc denseRank*[T](q: Query[T], partitionBy: openArray[string] = [],
   ## Добавя DENSE_RANK() window function.
   result = q
   let over = buildOverClause(partitionBy, orderByField, orderDir)
-  result.windowFunctions.add("DENSE_RANK() " & over & " AS \"" & alias & "\"")
+  result.windowFunctions.add("DENSE_RANK() " & over & " AS " & quoteIdentifier(alias))
 
 proc lag*[T](q: Query[T], field: string, offset: int = 1,
              partitionBy: openArray[string] = [],
@@ -282,7 +282,7 @@ proc lag*[T](q: Query[T], field: string, offset: int = 1,
   result = q
   let over = buildOverClause(partitionBy, orderByField, orderDir)
   let defaultAlias = if alias.len > 0: alias else: field & "_lag"
-  result.windowFunctions.add("LAG(\"" & field & "\", " & $offset & ") " & over & " AS \"" & defaultAlias & "\"")
+  result.windowFunctions.add("LAG(" & quoteIdentifier(field) & ", " & $offset & ") " & over & " AS " & quoteIdentifier(defaultAlias))
 
 proc lead*[T](q: Query[T], field: string, offset: int = 1,
               partitionBy: openArray[string] = [],
@@ -292,7 +292,7 @@ proc lead*[T](q: Query[T], field: string, offset: int = 1,
   result = q
   let over = buildOverClause(partitionBy, orderByField, orderDir)
   let defaultAlias = if alias.len > 0: alias else: field & "_lead"
-  result.windowFunctions.add("LEAD(\"" & field & "\", " & $offset & ") " & over & " AS \"" & defaultAlias & "\"")
+  result.windowFunctions.add("LEAD(" & quoteIdentifier(field) & ", " & $offset & ") " & over & " AS " & quoteIdentifier(defaultAlias))
 
 # --- Group By / Having ---
 
@@ -336,28 +336,28 @@ proc whereFragment*[T](q: Query[T], frag: SqlFragment): Query[T] =
 template jsonbContains*(field: string, json: string): SqlFragment =
   ## PostgreSQL `@>` оператор: jsonb съдържа даден обект.
   ## Пример: `whereDynamic(q, jsonbContains("profile", "{\"verified\":true}"))`
-  fragment("\"" & field & "\" @> $1", json)
+  fragment(quoteIdentifier(field) & " @> $1", json)
 
 template jsonbHasKey*(field: string, key: string): SqlFragment =
   ## PostgreSQL `?` оператор: jsonb има даден ключ.
-  fragment("\"" & field & "\" ? $1", key)
+  fragment(quoteIdentifier(field) & " ? $1", key)
 
 template jsonbHasAnyKeys*(field: string, keys: openArray[string]): SqlFragment =
   ## PostgreSQL `?|` оператор: jsonb има поне един от ключовете.
-  fragment("\"" & field & "\" ?| $1", "{" & keys.join(",") & "}")
+  fragment(quoteIdentifier(field) & " ?| $1", "{" & keys.join(",") & "}")
 
 template jsonbHasAllKeys*(field: string, keys: openArray[string]): SqlFragment =
   ## PostgreSQL `?&` оператор: jsonb има всички ключове.
-  fragment("\"" & field & "\" ?& $1", "{" & keys.join(",") & "}")
+  fragment(quoteIdentifier(field) & " ?& $1", "{" & keys.join(",") & "}")
 
 proc jsonbPathText*(field: string, path: openArray[string]): string =
   ## Връща SQL израз `field #>> '{path}'` за text extraction.
   ## Може да се използва с `whereRawField`.
-  result = "\"" & field & "\" #>> '{" & path.join(",") & "}'"
+  result = quoteIdentifier(field) & " #>> '{" & path.join(",") & "}'"
 
 proc jsonbPath*(field: string, path: openArray[string]): string =
   ## Връща SQL израз `field #> '{path}'` за JSON extraction.
-  result = "\"" & field & "\" #> '{" & path.join(",") & "}'"
+  result = quoteIdentifier(field) & " #> '{" & path.join(",") & "}'"
 
 proc whereRawField*[T](q: Query[T], fieldExpr: string, op: WhereOp, value: string;
                        conjunction: string = "AND"): Query[T] =
@@ -413,7 +413,7 @@ proc whereIn*[T](q: Query[T], field: string, sq: SubQuery[auto]): Query[T] =
   result = q
   let frag = sq.toSubqueryFragment()
   result.whereClauses.add(WhereClause(
-    field: "\"" & field & "\" IN " & frag.sql,
+    field: quoteIdentifier(field) & " IN " & frag.sql,
     op: Raw,
     value: "",
     conjunction: "AND",
@@ -426,7 +426,7 @@ proc whereNotIn*[T](q: Query[T], field: string, sq: SubQuery[auto]): Query[T] =
   result = q
   let frag = sq.toSubqueryFragment()
   result.whereClauses.add(WhereClause(
-    field: "\"" & field & "\" NOT IN " & frag.sql,
+    field: quoteIdentifier(field) & " NOT IN " & frag.sql,
     op: Raw,
     value: "",
     conjunction: "AND",
@@ -464,7 +464,7 @@ proc whereNotExists*[T](q: Query[T], sq: SubQuery[auto]): Query[T] =
 
 template toTsVector*(lang: string, field: string): string =
   ## SQL fragment: to_tsvector('lang', "field")
-  "to_tsvector('" & lang & "', \"" & field & "\")"
+  "to_tsvector('" & lang & "', " & quoteIdentifier(field) & ")"
 
 template plaintoTsQuery*(lang: string, query: string): SqlFragment =
   ## SQL fragment: plainto_tsquery('lang', $1)
@@ -487,7 +487,7 @@ proc whereTsVectorMatches*[T](q: Query[T], field: string, tsq: SqlFragment;
   ## WHERE "field" @@ tsquery — full-text match.
   ## Пример: q.whereTsVectorMatches("search_vector", plaintoTsQuery("simple", "nim orm"))
   result = q
-  let qf = if field.contains("("): field else: "\"" & field & "\""
+  let qf = if field.contains("("): field else: quoteIdentifier(field)
   result.whereClauses.add(WhereClause(
     field: qf & " @@ " & tsq.sql,
     op: Raw,
@@ -516,7 +516,7 @@ proc orderByTsRank*[T](q: Query[T], field: string, tsq: SqlFragment,
   ## Ако field е text колона, ползвайте toTsVector() ръчно:
   ##   q.orderByTsRank(toTsVector("simple", "content"), plaintoTsQuery(...))
   result = q
-  let qf = if field.contains("("): field else: "\"" & field & "\""
+  let qf = if field.contains("("): field else: quoteIdentifier(field)
   let frag = tsRank(qf, tsq)
   result.orderClauses.add(OrderClause(
     field: frag.sql, dir: dir, fragmentArgs: frag.args, isRawField: true
@@ -526,7 +526,7 @@ proc orderByTsRankCd*[T](q: Query[T], field: string, tsq: SqlFragment,
                          dir: OrderDirection = Desc): Query[T] =
   ## ORDER BY ts_rank_cd("field", tsquery) DIR.
   result = q
-  let qf = if field.contains("("): field else: "\"" & field & "\""
+  let qf = if field.contains("("): field else: quoteIdentifier(field)
   let frag = tsRankCd(qf, tsq)
   result.orderClauses.add(OrderClause(
     field: frag.sql, dir: dir, fragmentArgs: frag.args, isRawField: true
@@ -576,15 +576,15 @@ template toBoundQuery*[T](q: Query[T]): BoundQuery =
     for agg in q.aggregates:
       case agg.op
       of AggCount:
-        aggParts.add("COUNT(\"" & agg.field & "\") AS \"" & agg.alias & "\"")
+        aggParts.add("COUNT(" & quoteIdentifier(agg.field) & ") AS " & quoteIdentifier(agg.alias))
       of AggSum:
-        aggParts.add("SUM(\"" & agg.field & "\") AS \"" & agg.alias & "\"")
+        aggParts.add("SUM(" & quoteIdentifier(agg.field) & ") AS " & quoteIdentifier(agg.alias))
       of AggAvg:
-        aggParts.add("AVG(\"" & agg.field & "\") AS \"" & agg.alias & "\"")
+        aggParts.add("AVG(" & quoteIdentifier(agg.field) & ") AS " & quoteIdentifier(agg.alias))
       of AggMin:
-        aggParts.add("MIN(\"" & agg.field & "\") AS \"" & agg.alias & "\"")
+        aggParts.add("MIN(" & quoteIdentifier(agg.field) & ") AS " & quoteIdentifier(agg.alias))
       of AggMax:
-        aggParts.add("MAX(\"" & agg.field & "\") AS \"" & agg.alias & "\"")
+        aggParts.add("MAX(" & quoteIdentifier(agg.field) & ") AS " & quoteIdentifier(agg.alias))
     parts.add(aggParts.join(", "))
   elif q.selectFields.len > 0:
     var selectParts = q.selectFields
@@ -600,9 +600,9 @@ template toBoundQuery*[T](q: Query[T]): BoundQuery =
   let prefix = if queryTenantPrefix.len > 0: queryTenantPrefix
                else: meta.schemaPrefix
   if prefix.len > 0:
-    parts.add("\"" & prefix & "\".\"" & meta.tableName & "\"")
+    parts.add(quoteIdentifier(prefix) & "." & quoteIdentifier(meta.tableName))
   else:
-    parts.add("\"" & meta.tableName & "\"")
+    parts.add(quoteIdentifier(meta.tableName))
 
   # Joins
   if q.joinClauses.len > 0:
@@ -629,7 +629,7 @@ template toBoundQuery*[T](q: Query[T]): BoundQuery =
         if f.contains(".") or f.contains("(") or f.contains("#") or f.contains("@") or f.contains("?"):
           f
         else:
-          "\"" & f & "\""
+          quoteIdentifier(f)
 
       if w.isRawField:
         case w.op
@@ -722,20 +722,20 @@ template toBoundQuery*[T](q: Query[T]): BoundQuery =
       elif o.isRawField:
         orders.add(o.field & " " & dirStr)
       else:
-        orders.add("\"" & o.field & "\" " & dirStr)
+        orders.add(quoteIdentifier(o.field) & " " & dirStr)
     parts.add(orders.join(", "))
 
   # Group By
   if q.groupByFields.len > 0:
     parts.add("GROUP BY")
-    parts.add(q.groupByFields.mapIt("\"" & it & "\"").join(", "))
+    parts.add(q.groupByFields.mapIt(quoteIdentifier(it)).join(", "))
 
   # Having
   if q.havingClauses.len > 0:
     parts.add("HAVING")
     var havings: seq[string] = @[]
     for h in q.havingClauses:
-      let qf = if h.isRawField: h.field else: "\"" & h.field & "\""
+      let qf = if h.isRawField: h.field else: quoteIdentifier(h.field)
       case h.op
       of Eq:
         havings.add(qf & " = $" & $idx); args.add(h.value); inc idx
@@ -1001,8 +1001,7 @@ proc querySql*[T](q: Query[T]): string =
   ## Returns just the SQL string with all placeholders resolved to NULL.
   ## Useful for EXPLAIN verification and debugging.
   var bq = q.toBoundQuery()
-  for i in countdown(30, 1):
-    bq.sql = bq.sql.replace("$" & $i, "NULL")
+  bq.sql = bq.sql.replace(re"\$\d+", "NULL")
   bq.sql
 
 # --- Pipe operator for query pipelining (Elixir-style) ---

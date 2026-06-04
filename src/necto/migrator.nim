@@ -66,7 +66,7 @@ proc bootstrap*(mig: Migrator) =
   ## Създава таблицата за миграции ако не съществува.
   ## Добавя checksum колона ако липсва (backward compatibility).
   mig.repo.exec("""
-    CREATE TABLE IF NOT EXISTS """ & "\"" & mig.migrationsTable & "\"" & """ (
+    CREATE TABLE IF NOT EXISTS """ & quoteIdentifier(mig.migrationsTable) & """ (
       version TEXT PRIMARY KEY,
       name TEXT NOT NULL,
       checksum TEXT,
@@ -75,7 +75,7 @@ proc bootstrap*(mig: Migrator) =
   """)
   # Добавяме checksum колона ако таблицата е от стара версия
   try:
-    mig.repo.exec("ALTER TABLE \"" & mig.migrationsTable & "\" ADD COLUMN IF NOT EXISTS checksum TEXT")
+    mig.repo.exec("ALTER TABLE " & quoteIdentifier(mig.migrationsTable) & " ADD COLUMN IF NOT EXISTS checksum TEXT")
   except DatabaseError:
     discard
 
@@ -85,8 +85,8 @@ proc appliedMigrations*(mig: Migrator): seq[(string, string, string)] =
   ## Връща списък с приложените миграции от БД.
   ## Tuple: (version, name, checksum)
   let rows = mig.repo.queryRaw(
-    "SELECT version, name, COALESCE(checksum, '') FROM \"" & mig.migrationsTable &
-    "\" ORDER BY version ASC"
+    "SELECT version, name, COALESCE(checksum, '') FROM " & quoteIdentifier(mig.migrationsTable) &
+    " ORDER BY version ASC"
   )
   for row in rows:
     if row.len >= 3:
@@ -97,16 +97,16 @@ proc appliedMigrations*(mig: Migrator): seq[(string, string, string)] =
 proc recordMigration*(mig: Migrator, version, name, checksum: string) =
   ## Записва миграция като приложена.
   mig.repo.exec(
-    "INSERT INTO \"" & mig.migrationsTable &
-    "\" (version, name, checksum) VALUES ($1, $2, $3)",
+    "INSERT INTO " & quoteIdentifier(mig.migrationsTable) &
+    " (version, name, checksum) VALUES ($1, $2, $3)",
     @[version, name, checksum]
   )
 
 proc removeMigration*(mig: Migrator, version: string) =
   ## Премахва запис за миграция (при rollback).
   mig.repo.exec(
-    "DELETE FROM \"" & mig.migrationsTable &
-    "\" WHERE version = $1",
+    "DELETE FROM " & quoteIdentifier(mig.migrationsTable) &
+    " WHERE version = $1",
     @[version]
   )
 
