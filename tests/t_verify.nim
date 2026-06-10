@@ -2,9 +2,8 @@
 ##
 ## Проверява че verifySchema() работи коректно с реална PostgreSQL база.
 
-import std/[unittest, tables, strutils]
+import std/[unittest, strutils]
 import ../src/necto
-import ../src/necto/adapters/postgres
 import support/test_repo
 
 suite "Schema Verification (runtime)":

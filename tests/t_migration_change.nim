@@ -1,8 +1,7 @@
 ## Тестове за `change` direction в миграциите
 
-import std/[unittest, tables, strutils]
+import std/[unittest]
 import ../src/necto
-import ../src/necto/adapters/postgres
 import support/test_repo
 
 # Дефинираме миграциите на top level (извън suite), защото типовете трябва

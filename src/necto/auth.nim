@@ -31,7 +31,7 @@ proc defaultAuthConfig*(secret: string): AuthConfig =
 
 proc hashPassword*(password: string, rounds: int = 10): string =
   ## Hashes a password with bcrypt. Returns the full hash string (salt + hash).
-  let salt = generateSalt(max(4, min(31, rounds)).CostFactor)
+  let salt = generateSalt(CostFactor(max(4, min(31, rounds))))
   result = $bcrypt(password, salt)
 
 proc verifyPassword*(password: string, hash: string): bool =

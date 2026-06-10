@@ -13,7 +13,7 @@
 ##   # Всичко или нищо — ако която и да е стъпка fail-не,
 ##   # цялата транзакция се rollback-ва.
 
-import std/[tables, sets, strutils]
+import std/[tables, sets]
 import ./repo, ./changeset, ./errors, ./schema, ./query
 
 export repo, changeset, errors, schema, query

@@ -10,7 +10,7 @@
 ## When compiled with -d:nectoVerify, the query is EXPLAIN-ed against
 ## the database at startup. Invalid queries stop the program immediately.
 
-import std/[os, strutils, tables, sets, json]
+import std/[os, strutils, sets]
 import db_connector/db_postgres as pg
 import ./query
 import ./schema

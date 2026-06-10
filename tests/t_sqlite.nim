@@ -2,7 +2,7 @@
 ##
 ## Тества основни CRUD операции, транзакции и миграции с SQLite (in-memory).
 
-import std/[unittest, os]
+import std/[unittest]
 import necto
 import necto/adapters/sqlite
 

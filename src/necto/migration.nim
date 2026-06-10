@@ -12,7 +12,7 @@
 ##     down:
 ##       dropTable repo, "users"
 
-import std/[macros, strutils, tables, sequtils, algorithm]
+import std/[macros, strutils, sequtils, algorithm]
 import checksums/md5
 import ./adapters/base
 import ./repo

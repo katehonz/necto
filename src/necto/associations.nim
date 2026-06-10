@@ -113,13 +113,18 @@ template preloadBelongsTo*[Parent, Child](repo: Repo, parents: seq[Parent]): Tab
 
       let conn = repo.getReadConn()
       let a = if repo.readAdapter != nil: repo.readAdapter else: repo.adapter
+      if a == nil:
+        raise newException(QueryError, "No adapter configured on Repo (both adapter and readAdapter are nil)")
       let rows = a.query(conn, sql, fkValues)
       repo.releaseConn(conn, a)
 
       for row in rows:
         let child = load(row, Child)
-        let pkVal = parseBiggestInt(getFieldValRuntime(child, assoc.ownerKey))
-        childMap[pkVal] = child
+        try:
+          let pkVal = parseBiggestInt(getFieldValRuntime(child, assoc.ownerKey))
+          childMap[pkVal] = child
+        except ValueError:
+          raise newException(QueryError, "Non-integer primary key in belongs_to: " & $Child & "." & assoc.ownerKey)
 
     childMap
 
@@ -174,15 +179,20 @@ template preloadHasMany*[Parent, Child](repo: Repo, parents: seq[Parent]): Table
 
       let conn = repo.getReadConn()
       let a = if repo.readAdapter != nil: repo.readAdapter else: repo.adapter
+      if a == nil:
+        raise newException(QueryError, "No adapter configured on Repo (both adapter and readAdapter are nil)")
       let rows = a.query(conn, sql, pkValues)
       repo.releaseConn(conn, a)
 
       for row in rows:
         let child = load(row, Child)
-        let fkVal = parseBiggestInt(getFieldValRuntime(child, fkField))
-        if not childGroups.hasKey(fkVal):
-          childGroups[fkVal] = @[]
-        childGroups[fkVal].add(child)
+        try:
+          let fkVal = parseBiggestInt(getFieldValRuntime(child, fkField))
+          if not childGroups.hasKey(fkVal):
+            childGroups[fkVal] = @[]
+          childGroups[fkVal].add(child)
+        except ValueError:
+          raise newException(QueryError, "Non-integer foreign key in has_many: " & $Child & "." & fkField)
 
     childGroups
 
@@ -221,6 +231,8 @@ template preloadManyToMany*[Parent, Child](repo: Repo, parents: seq[Parent], joi
 
       let conn = repo.getReadConn()
       let a = if repo.readAdapter != nil: repo.readAdapter else: repo.adapter
+      if a == nil:
+        raise newException(QueryError, "No adapter configured on Repo (both adapter and readAdapter are nil)")
       let rows = a.query(conn, sql, pkValues)
       repo.releaseConn(conn, a)
 
@@ -229,10 +241,13 @@ template preloadManyToMany*[Parent, Child](repo: Repo, parents: seq[Parent], joi
         let parentIdVal = row[^1]
         let childRow = row[0..^2]  # всички колони без __parent_id__
         let child = load(childRow, Child)
-        let parentId = parseBiggestInt(parentIdVal)
-        if not childGroups.hasKey(parentId):
-          childGroups[parentId] = @[]
-        childGroups[parentId].add(child)
+        try:
+          let parentId = parseBiggestInt(parentIdVal)
+          if not childGroups.hasKey(parentId):
+            childGroups[parentId] = @[]
+          childGroups[parentId].add(child)
+        except ValueError:
+          raise newException(QueryError, "Non-integer primary key in many_to_many: " & $Parent)
 
     childGroups
 
@@ -287,12 +302,17 @@ template preloadHasOne*[Parent, Child](repo: Repo, parents: seq[Parent]): Table[
 
       let conn = repo.getReadConn()
       let a = if repo.readAdapter != nil: repo.readAdapter else: repo.adapter
+      if a == nil:
+        raise newException(QueryError, "No adapter configured on Repo (both adapter and readAdapter are nil)")
       let rows = a.query(conn, sql, pkValues)
       repo.releaseConn(conn, a)
 
       for row in rows:
         let child = load(row, Child)
-        let fkVal = parseBiggestInt(getFieldValRuntime(child, fkField))
-        childMap[fkVal] = child
+        try:
+          let fkVal = parseBiggestInt(getFieldValRuntime(child, fkField))
+          childMap[fkVal] = child
+        except ValueError:
+          raise newException(QueryError, "Non-integer foreign key in has_one: " & $Child & "." & fkField)
 
     childMap

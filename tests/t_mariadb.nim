@@ -3,7 +3,7 @@
 ## Тества основни CRUD операции, транзакции и миграции с MariaDB.
 ## Изисква MariaDB сървър на localhost:3306, база "necto", user "root", password "pas+123".
 
-import std/[unittest, times, tables, options]
+import std/[unittest]
 import necto
 import necto/adapters/mariadb
 

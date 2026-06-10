@@ -11,7 +11,7 @@
 ##   proc dumpValue*(val: MyType): string
 ##   proc castValue*(val: string, T: typedesc[MyType]): MyType
 
-import std/[strutils, parseutils]
+import std/[strutils]
 import ./type_system
 
 export type_system

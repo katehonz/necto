@@ -2,7 +2,6 @@
 
 import std/[unittest, hashes]
 import ../src/necto
-import ../src/necto/adapters/postgres
 import ../src/necto/migrator
 import support/test_repo
 
