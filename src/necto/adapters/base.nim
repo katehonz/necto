@@ -6,6 +6,10 @@
 # No stdlib imports needed for base adapter interface
 
 type
+  SqlDialect* = enum
+    ## SQL диалект на базата данни.
+    pdPostgres, pdMariaDb, pdSqlite
+
   DbRow* = seq[string]
     ## Ред от базата данни като seq от низове.
 
@@ -35,6 +39,7 @@ type
     password*: string
     database*: string
     poolSize*: int
+    dialect*: SqlDialect
 
   Connection* = ref object of RootObj
     ## Абстрактна връзка към базата данни. Всеки адаптер я subclass-ва.
@@ -106,6 +111,25 @@ method prepStmtMetrics*(a: Adapter): PrepStmtMetrics {.base.} =
 method slowQueryCount*(a: Adapter): int64 {.base.} =
   ## Връща броя на бавните заявки. Базовата имплементация връща 0.
   0
+
+method supportsReturning*(a: Adapter): bool {.base.} =
+  ## Връща дали адаптерът поддържа native RETURNING клауза.
+  a.dialect == pdPostgres
+
+method supportsOnConflict*(a: Adapter): bool {.base.} =
+  ## Връща дали адаптерът поддържа ON CONFLICT (upsert).
+  a.dialect == pdPostgres
+
+method supportsCursor*(a: Adapter): bool {.base.} =
+  ## Връща дали адаптерът поддържа server-side курсори.
+  a.dialect == pdPostgres
+
+method quoteIdentifier*(a: Adapter, name: string): string {.base.} =
+  ## Огражда идентификатор с подходящи кавички за диалекта.
+  case a.dialect
+  of pdMariaDb: "`" & name & "`"
+  of pdSqlite: "`" & name & "`"
+  else: "\"" & name & "\""
 
 proc toPrometheus*(m: PoolMetrics; namespace: string = "necto"): string =
   ## Експортира метриките в Prometheus текстов формат.

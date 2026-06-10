@@ -103,12 +103,95 @@ proc cols*(defs: seq[ColumnDef]): seq[ColumnDef] =
   ## Overload that accepts a seq directly (e.g., from timestamps()).
   result = defs
 
+# --- Dialect-aware helpers ---
+
+proc translateDbType*(pgType: string; dialect: SqlDialect = pdPostgres): string =
+  ## Превежда PostgreSQL типове към диалект-специфичен еквивалент.
+  if dialect == pdPostgres:
+    return pgType
+  if dialect == pdSqlite:
+    case pgType.toLowerAscii()
+    of "bigserial", "serial":
+      result = "INTEGER PRIMARY KEY AUTOINCREMENT"
+    of "integer", "int", "smallint", "bigint":
+      result = "INTEGER"
+    of "text":
+      result = "TEXT"
+    of "boolean":
+      result = "INTEGER"
+    of "double precision", "numeric":
+      result = "REAL"
+    of "timestamp with time zone", "timestamp without time zone", "date", "time without time zone":
+      result = "TEXT"
+    of "jsonb", "json":
+      result = "TEXT"
+    of "uuid":
+      result = "TEXT"
+    of "bytea":
+      result = "BLOB"
+    else:
+      if pgType.endsWith("[]"):
+        result = "TEXT"
+      else:
+        result = pgType
+    return
+  # MariaDB
+  case pgType.toLowerAscii()
+  of "bigserial":
+    result = "BIGINT AUTO_INCREMENT PRIMARY KEY"
+  of "serial":
+    result = "INT AUTO_INCREMENT PRIMARY KEY"
+  of "integer", "int":
+    result = "INT"
+  of "smallint":
+    result = "SMALLINT"
+  of "bigint":
+    result = "BIGINT"
+  of "text":
+    result = "TEXT"
+  of "boolean":
+    result = "TINYINT(1)"
+  of "double precision":
+    result = "DOUBLE"
+  of "timestamp with time zone", "timestamp without time zone":
+    result = "DATETIME(6)"
+  of "date":
+    result = "DATE"
+  of "time without time zone":
+    result = "TIME"
+  of "jsonb", "json":
+    result = "JSON"
+  of "uuid":
+    result = "CHAR(36)"
+  of "numeric":
+    result = "DECIMAL(38,10)"
+  of "bytea":
+    result = "BLOB"
+  else:
+    if pgType.endsWith("[]"):
+      result = "JSON"
+    else:
+      result = pgType
+
+proc dialectQuote*(name: string; dialect: SqlDialect = pdPostgres): string =
+  ## Огражда идентификатор с подходящи кавички за диалекта.
+  case dialect
+  of pdMariaDb, pdSqlite: "`" & name & "`"
+  else: "\"" & name & "\""
+
+proc getRepoDialect(repo: Repo): SqlDialect =
+  if repo.adapter != nil:
+    result = repo.adapter.dialect
+  else:
+    result = pdPostgres
+
 # --- SQL генератори ---
 
-proc columnToSql(c: ColumnDef): string =
+proc columnToSql(c: ColumnDef; dialect: SqlDialect = pdPostgres): string =
+  let translatedType = translateDbType(c.dbType, dialect)
   if c.primaryKey and c.dbType == "bigserial":
-    return "\"" & c.name & "\" BIGSERIAL PRIMARY KEY"
-  var parts = @["\"" & c.name & "\"", c.dbType]
+    return dialectQuote(c.name, dialect) & " " & translatedType
+  var parts = @[dialectQuote(c.name, dialect), translatedType]
   if c.primaryKey:
     parts.add("PRIMARY KEY")
   if not c.null:
@@ -123,97 +206,124 @@ proc columnToSql(c: ColumnDef): string =
       parts.add("ON DELETE " & c.onDelete)
   parts.join(" ")
 
-proc createTableSql*(tableName: string, columns: seq[ColumnDef]): string =
+proc createTableSql*(tableName: string, columns: seq[ColumnDef]; dialect: SqlDialect = pdPostgres): string =
   var parts: seq[string] = @[]
   for c in columns:
-    parts.add("  " & columnToSql(c))
-  "CREATE TABLE IF NOT EXISTS \"" & tableName & "\" (\n" & parts.join(",\n") & "\n)"
+    parts.add("  " & columnToSql(c, dialect))
+  "CREATE TABLE IF NOT EXISTS " & dialectQuote(tableName, dialect) & " (\n" & parts.join(",\n") & "\n)"
 
-proc dropTableSql*(tableName: string): string =
-  "DROP TABLE IF EXISTS \"" & tableName & "\""
+proc dropTableSql*(tableName: string; dialect: SqlDialect = pdPostgres): string =
+  "DROP TABLE IF EXISTS " & dialectQuote(tableName, dialect)
 
 proc addColumnSql*(tableName, colName, dbType: string;
                    nullable: bool = true, default: string = "",
-                   unique: bool = false): string =
-  var parts = @["ALTER TABLE \"" & tableName & "\" ADD COLUMN \"" & colName & "\" " & dbType]
+                   unique: bool = false; dialect: SqlDialect = pdPostgres): string =
+  var parts = @["ALTER TABLE " & dialectQuote(tableName, dialect) & " ADD COLUMN " & dialectQuote(colName, dialect) & " " & translateDbType(dbType, dialect)]
   if not nullable: parts.add("NOT NULL")
   if default.len > 0: parts.add("DEFAULT " & default)
   if unique: parts.add("UNIQUE")
   parts.join(" ")
 
-proc dropColumnSql*(tableName, colName: string): string =
-  "ALTER TABLE \"" & tableName & "\" DROP COLUMN IF EXISTS \"" & colName & "\""
+proc dropColumnSql*(tableName, colName: string; dialect: SqlDialect = pdPostgres): string =
+  if dialect == pdMariaDb or dialect == pdSqlite:
+    "ALTER TABLE " & dialectQuote(tableName, dialect) & " DROP COLUMN " & dialectQuote(colName, dialect)
+  else:
+    "ALTER TABLE " & dialectQuote(tableName, dialect) & " DROP COLUMN IF EXISTS " & dialectQuote(colName, dialect)
 
-proc renameColumnSql*(tableName, oldName, newName: string): string =
-  "ALTER TABLE \"" & tableName & "\" RENAME COLUMN \"" & oldName & "\" TO \"" & newName & "\""
+proc renameColumnSql*(tableName, oldName, newName: string; dialect: SqlDialect = pdPostgres): string =
+  if dialect == pdMariaDb:
+    # MariaDB uses CHANGE COLUMN (needs type info, but we don't have it here — placeholder)
+    "ALTER TABLE " & dialectQuote(tableName, dialect) & " CHANGE COLUMN " & dialectQuote(oldName, dialect) & " " & dialectQuote(newName, dialect)
+  else:
+    "ALTER TABLE " & dialectQuote(tableName, dialect) & " RENAME COLUMN " & dialectQuote(oldName, dialect) & " TO " & dialectQuote(newName, dialect)
 
-proc renameTableSql*(oldName, newName: string): string =
-  "ALTER TABLE \"" & oldName & "\" RENAME TO \"" & newName & "\""
+proc renameTableSql*(oldName, newName: string; dialect: SqlDialect = pdPostgres): string =
+  "ALTER TABLE " & dialectQuote(oldName, dialect) & " RENAME TO " & dialectQuote(newName, dialect)
 
 proc addReferenceSql*(tableName, refTable, colName: string;
-                      onDelete: string = "SET NULL"): string =
+                      onDelete: string = "SET NULL"; dialect: SqlDialect = pdPostgres): string =
   let fkCol = if colName.len > 0: colName else: refTable & "_id"
   let fkName = "fk_" & tableName & "_" & fkCol
-  "ALTER TABLE \"" & tableName & "\" ADD COLUMN \"" & fkCol &
-  "\" BIGINT, ADD CONSTRAINT \"" & fkName &
-  "\" FOREIGN KEY (\"" & fkCol & "\") REFERENCES \"" & refTable & "\"(id) ON DELETE " & onDelete
+  if dialect == pdSqlite:
+    # SQLite does not support ALTER TABLE ADD CONSTRAINT.
+    # We add the column without the FK constraint.
+    "ALTER TABLE " & dialectQuote(tableName, dialect) & " ADD COLUMN " & dialectQuote(fkCol, dialect) & " INTEGER"
+  else:
+    "ALTER TABLE " & dialectQuote(tableName, dialect) & " ADD COLUMN " & dialectQuote(fkCol, dialect) &
+    " BIGINT, ADD CONSTRAINT " & dialectQuote(fkName, dialect) &
+    " FOREIGN KEY (" & dialectQuote(fkCol, dialect) & ") REFERENCES " & dialectQuote(refTable, dialect) & "(id) ON DELETE " & onDelete
 
-proc removeReferenceSql*(tableName, refTable, colName: string): string =
+proc removeReferenceSql*(tableName, refTable, colName: string; dialect: SqlDialect = pdPostgres): string =
   let fkCol = if colName.len > 0: colName else: refTable & "_id"
   let fkName = "fk_" & tableName & "_" & fkCol
-  "ALTER TABLE \"" & tableName & "\" DROP CONSTRAINT IF EXISTS \"" & fkName &
-  "\", DROP COLUMN IF EXISTS \"" & fkCol & "\""
+  if dialect == pdMariaDb:
+    "ALTER TABLE " & dialectQuote(tableName, dialect) & " DROP FOREIGN KEY " & dialectQuote(fkName, dialect) &
+    ", DROP COLUMN " & dialectQuote(fkCol, dialect)
+  elif dialect == pdSqlite:
+    "ALTER TABLE " & dialectQuote(tableName, dialect) & " DROP COLUMN " & dialectQuote(fkCol, dialect)
+  else:
+    "ALTER TABLE " & dialectQuote(tableName, dialect) & " DROP CONSTRAINT IF EXISTS " & dialectQuote(fkName, dialect) &
+    ", DROP COLUMN IF EXISTS " & dialectQuote(fkCol, dialect)
 
 proc createIndexSql*(tableName: string, columns: seq[string];
-                     unique: bool = false, indexName: string = ""): string =
+                     unique: bool = false, indexName: string = ""; dialect: SqlDialect = pdPostgres): string =
   var name = indexName
   if name.len == 0: name = tableName & "_" & columns.join("_") & "_idx"
   let uniq = if unique: "UNIQUE " else: ""
-  let colList = columns.mapIt("\"" & it & "\"").join(", ")
-  "CREATE " & uniq & "INDEX IF NOT EXISTS \"" & name & "\" ON \"" & tableName & "\" (" & colList & ")"
+  let colList = columns.mapIt(dialectQuote(it, dialect)).join(", ")
+  if dialect == pdMariaDb:
+    "CREATE " & uniq & "INDEX " & dialectQuote(name, dialect) & " ON " & dialectQuote(tableName, dialect) & " (" & colList & ")"
+  else:
+    "CREATE " & uniq & "INDEX IF NOT EXISTS " & dialectQuote(name, dialect) & " ON " & dialectQuote(tableName, dialect) & " (" & colList & ")"
 
 proc dropIndexSql*(tableName: string, columns: seq[string] = @[];
-                   indexName: string = ""): string =
+                   indexName: string = ""; dialect: SqlDialect = pdPostgres): string =
   var name = indexName
   if name.len == 0 and columns.len > 0: name = tableName & "_" & columns.join("_") & "_idx"
-  if name.len > 0: "DROP INDEX IF EXISTS \"" & name & "\"" else: ""
+  if name.len > 0:
+    if dialect == pdMariaDb:
+      "DROP INDEX " & dialectQuote(name, dialect) & " ON " & dialectQuote(tableName, dialect)
+    else:
+      "DROP INDEX IF EXISTS " & dialectQuote(name, dialect)
+  else:
+    ""
 
 # --- Удобни shortcut функции (викат се вътре в up/down) ---
 
 proc createTable*(repo: auto, tableName: string, columns: seq[ColumnDef]) =
-  repo.exec(createTableSql(tableName, columns))
+  repo.exec(createTableSql(tableName, columns, getRepoDialect(repo)))
 
 proc dropTable*(repo: auto, tableName: string) =
-  repo.exec(dropTableSql(tableName))
+  repo.exec(dropTableSql(tableName, getRepoDialect(repo)))
 
 proc addColumn*(repo: auto, tableName, colName, dbType: string;
                 nullable: bool = true, default: string = "", unique: bool = false) =
-  repo.exec(addColumnSql(tableName, colName, dbType, nullable, default, unique))
+  repo.exec(addColumnSql(tableName, colName, dbType, nullable, default, unique, getRepoDialect(repo)))
 
 proc dropColumn*(repo: auto, tableName, colName: string) =
-  repo.exec(dropColumnSql(tableName, colName))
+  repo.exec(dropColumnSql(tableName, colName, getRepoDialect(repo)))
 
 proc renameColumn*(repo: auto, tableName, oldName, newName: string) =
-  repo.exec(renameColumnSql(tableName, oldName, newName))
+  repo.exec(renameColumnSql(tableName, oldName, newName, getRepoDialect(repo)))
 
 proc renameTable*(repo: auto, oldName, newName: string) =
-  repo.exec(renameTableSql(oldName, newName))
+  repo.exec(renameTableSql(oldName, newName, getRepoDialect(repo)))
 
 proc addReference*(repo: auto, tableName, refTable: string;
                    colName: string = "", onDelete: string = "SET NULL") =
-  repo.exec(addReferenceSql(tableName, refTable, colName, onDelete))
+  repo.exec(addReferenceSql(tableName, refTable, colName, onDelete, getRepoDialect(repo)))
 
 proc removeReference*(repo: auto, tableName, refTable: string;
                       colName: string = "") =
-  repo.exec(removeReferenceSql(tableName, refTable, colName))
+  repo.exec(removeReferenceSql(tableName, refTable, colName, getRepoDialect(repo)))
 
 proc createIndex*(repo: auto, tableName: string, columns: seq[string];
                   unique: bool = false, indexName: string = "") =
-  repo.exec(createIndexSql(tableName, columns, unique, indexName))
+  repo.exec(createIndexSql(tableName, columns, unique, indexName, getRepoDialect(repo)))
 
 proc dropIndex*(repo: auto, tableName: string, columns: seq[string] = @[];
                 indexName: string = "") =
-  let sql = dropIndexSql(tableName, columns, indexName)
+  let sql = dropIndexSql(tableName, columns, indexName, getRepoDialect(repo))
   if sql.len > 0: repo.exec(sql)
 
 proc execSql*(repo: auto, sql: string) =
@@ -226,22 +336,39 @@ proc execute*(repo: auto, sql: string) =
 proc modify*(repo: auto, tableName, colName, newDbType: string;
              nullable: bool = true, default: string = "") =
   ## Ecto-style: променя тип/конфигурация на колона.
-  var parts = @["ALTER TABLE \"" & tableName & "\" ALTER COLUMN \"" & colName & "\" TYPE " & newDbType]
+  let dialect = getRepoDialect(repo)
+  if dialect == pdSqlite:
+    raise newException(MigrationError, "SQLite does not support ALTER TABLE MODIFY COLUMN. Use recreate table instead.")
+  var parts: seq[string]
+  if dialect == pdMariaDb:
+    parts.add("ALTER TABLE " & dialectQuote(tableName, dialect) & " MODIFY COLUMN " & dialectQuote(colName, dialect) & " " & translateDbType(newDbType, dialect))
+  else:
+    parts.add("ALTER TABLE " & dialectQuote(tableName, dialect) & " ALTER COLUMN " & dialectQuote(colName, dialect) & " TYPE " & translateDbType(newDbType, dialect))
   if default.len > 0:
-    parts.add("ALTER TABLE \"" & tableName & "\" ALTER COLUMN \"" & colName & "\" SET DEFAULT " & default)
+    parts.add("ALTER TABLE " & dialectQuote(tableName, dialect) & " ALTER COLUMN " & dialectQuote(colName, dialect) & " SET DEFAULT " & default)
   if not nullable:
-    parts.add("ALTER TABLE \"" & tableName & "\" ALTER COLUMN \"" & colName & "\" SET NOT NULL")
+    parts.add("ALTER TABLE " & dialectQuote(tableName, dialect) & " ALTER COLUMN " & dialectQuote(colName, dialect) & " SET NOT NULL")
   repo.exec(parts.join("; "))
 
 proc addConstraint*(repo: auto, tableName, constraintName, definition: string) =
   ## Добавя именуван constraint (CHECK, UNIQUE, etc).
-  repo.exec("ALTER TABLE \"" & tableName & "\" ADD CONSTRAINT \"" &
-            constraintName & "\" " & definition)
+  let dialect = getRepoDialect(repo)
+  if dialect == pdSqlite:
+    raise newException(MigrationError, "SQLite does not support ALTER TABLE ADD CONSTRAINT. Define constraints in CREATE TABLE instead.")
+  repo.exec("ALTER TABLE " & dialectQuote(tableName, dialect) & " ADD CONSTRAINT " &
+            dialectQuote(constraintName, dialect) & " " & definition)
 
 proc dropConstraint*(repo: auto, tableName, constraintName: string) =
   ## Премахва именуван constraint.
-  repo.exec("ALTER TABLE \"" & tableName & "\" DROP CONSTRAINT IF EXISTS \"" &
-            constraintName & "\"")
+  let dialect = getRepoDialect(repo)
+  if dialect == pdSqlite:
+    raise newException(MigrationError, "SQLite does not support ALTER TABLE DROP CONSTRAINT.")
+  if dialect == pdMariaDb:
+    repo.exec("ALTER TABLE " & dialectQuote(tableName, dialect) & " DROP CONSTRAINT " &
+              dialectQuote(constraintName, dialect))
+  else:
+    repo.exec("ALTER TABLE " & dialectQuote(tableName, dialect) & " DROP CONSTRAINT IF EXISTS " &
+              dialectQuote(constraintName, dialect))
 
 # --- Макро за дефиниране на миграция с auto-registration ---
 

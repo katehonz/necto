@@ -1,6 +1,8 @@
 # Necto 🍯
 
-> **PostgreSQL-first ORM for Nim 2.x**, inspired by [Ecto](https://hexdocs.pm/ecto/Ecto.html) (Elixir) and [Avram](https://github.com/luckyframework/avram) (Crystal).
+> **Multi-database ORM for Nim 2.x**, inspired by [Ecto](https://hexdocs.pm/ecto/Ecto.html) (Elixir) and [Avram](https://github.com/luckyframework/avram) (Crystal).
+>
+> Supports **PostgreSQL**, **MariaDB/MySQL**, and **SQLite**.
 
 ```nim
 import necto
@@ -29,6 +31,7 @@ The Crystal community built **Avram** — an Ecto-like ORM that made the languag
 | Feature | Necto | Norm | ActiveRecord |
 |---------|-------|------|--------------|
 | Repository Pattern | ✅ | ⚠️ | ❌ |
+| Multi-database (PG, MySQL, SQLite) | ✅ | ❌ | ⚠️ |
 | Composable queries | ✅ | ❌ | ⚠️ |
 | Subqueries (IN, EXISTS) | ✅ | ❌ | ✅ |
 | CTEs (WITH) | ✅ | ❌ | ✅ |
@@ -55,8 +58,9 @@ The Crystal community built **Avram** — an Ecto-like ORM that made the languag
        ▼                                        ▼
 ┌─────────────┐                       ┌─────────────┐
 │  Changeset  │◀──────────────────────│   Adapter   │
-│ (validation)│                       │ (postgres)  │
-└─────────────┘                       └─────────────┘
+│ (validation)│                       │ (PG/MySQL/  │
+└─────────────┘                       │   SQLite)   │
+                                      └─────────────┘
 ```
 
 | Component | Responsibility | Analog |
@@ -85,10 +89,11 @@ cd necto
 nimble develop
 ```
 
-**Requirements:** Nim >= 2.0.0, PostgreSQL >= 12, `db_connector` (installed automatically)
+**Requirements:** Nim >= 2.0.0, `db_connector` (installed automatically). One of: PostgreSQL >= 12, MariaDB/MySQL >= 10.2, or SQLite >= 3.25.
 
 ### 1. Define a Repo
 
+**PostgreSQL:**
 ```nim
 import necto
 import necto/adapters/postgres
@@ -101,7 +106,35 @@ necto_repo AppRepo:
   password "pas+123"
   database "my_app"
   pool_size 10
+```
 
+**MariaDB / MySQL:**
+```nim
+import necto
+import necto/adapters/mariadb
+
+necto_repo AppRepo:
+  adapter MariaDbAdapter
+  host "localhost"
+  port 3306
+  user "root"
+  password "pas+123"
+  database "my_app"
+  pool_size 10
+```
+
+**SQLite:**
+```nim
+import necto
+import necto/adapters/sqlite
+
+necto_repo AppRepo:
+  adapter SqliteAdapter
+  database "my_app.db"  # or ":memory:" for tests
+  pool_size 1
+```
+
+```nim
 let repo = apprepoInstance
 ```
 
@@ -245,11 +278,15 @@ let usersWithPosts = repo.allWithPreload(
 ## Testing
 
 ```bash
-# Create test database
+# PostgreSQL — create test database first
 PGPASSWORD='pas+123' psql -U postgres -c "CREATE DATABASE necto_test;"
+nimble test_postgres
 
-# Run tests
-nimble test
+# MariaDB — requires running server on localhost:3306, DB "necto", user "root"/"pas+123"
+nimble test_mariadb
+
+# SQLite — in-memory, no setup needed
+nimble test_sqlite
 ```
 
 ---
@@ -274,8 +311,9 @@ Bulgarian README: [README_BG.md](./README_BG.md)
 |---------|------|
 | **0.1.0** | ✅ Skeleton, schema, repo, adapter, migrations |
 | **0.2.0** | ✅ Type-safe query DSL, bound parameters, transaction context, preload |
-| **0.3.0** | ✅ Advanced changeset (confirmation, exclusion, change management), batch ops, pipe operator, auto-preload, reverse schema generation |
-| **0.4.0** | Performance: prepared statements, compiled query cache, pool metrics |
+| **0.3.0** | ✅ Advanced changeset, batch ops, pipe operator, auto-preload, reverse schema generation |
+| **0.4.0** | ✅ Multi-database: PostgreSQL, MariaDB/MySQL, SQLite; dialect-aware migrations |
+| **0.5.0** | Performance: prepared statements, compiled query cache, pool metrics |
 | **1.0.0** | Async support, read replicas, production ready |
 
 ---

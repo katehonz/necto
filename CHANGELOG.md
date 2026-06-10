@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Multi-database support**: MariaDB/MySQL and SQLite adapters alongside PostgreSQL.
+  - `MariaDbAdapter` in `necto/adapters/mariadb` — connection pooling, `$N` → `?` translation, `LAST_INSERT_ID()` emulation.
+  - `SqliteAdapter` in `necto/adapters/sqlite` — single shared connection with locking, `$N` → `?` translation, `last_insert_rowid()` emulation.
+  - `SqlDialect` enum (`pdPostgres`, `pdMariaDb`, `pdSqlite`) with dialect-aware identifier quoting and type mapping.
+  - Dialect-aware migration DDL generators (`createTable`, `dropTable`, `addColumn`, `renameColumn`, `modify`, etc.).
+- Added `necto/adapters/common.nim` with shared utilities: `translatePlaceholders`, `SlowQueryTracker`, generic `runSelect`/`runExec`/`runScalar`/`runAffected` helpers.
+- Added integration tests: `tests/t_mariadb.nim` (11 tests) and `tests/t_sqlite.nim` (12 tests).
+- Added `nimble test_mariadb` and `nimble test_sqlite` tasks.
 - Added `quoteIdentifier` proc to safely escape PostgreSQL identifiers (tables, columns) and prevent SQL injection via double-quote doubling.
 - Added GitHub Actions CI workflow (`.github/workflows/ci.yml`) with PostgreSQL service container.
 - Added `CHANGELOG.md` and `CONTRIBUTING.md`.

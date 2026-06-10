@@ -207,6 +207,7 @@ type
   StreamIterator*[T] = object
     ## Cursor-based iterator за големи резултати.
     ## Задържа една връзка и една транзакция за целия stream.
+    ## За MariaDB се емулира чрез LIMIT/OFFSET.
     conn: Connection
     adapter: Adapter
     cursorName: string
@@ -215,6 +216,8 @@ type
     buffer: seq[T]
     bufferIdx: int
     finished: bool
+    currentOffset: int
+    useCursor: bool
 
 proc next*[T](it: var StreamIterator[T]): Option[T] =
   ## Връща следващия запис от stream-а или none ако stream-ът е изчерпан.
@@ -226,7 +229,14 @@ proc next*[T](it: var StreamIterator[T]): Option[T] =
   if it.bufferIdx >= it.buffer.len:
     it.bufferIdx = 0
     it.buffer = @[]
-    let rows = it.adapter.fetchCursor(it.conn, it.cursorName, it.batchSize)
+    var rows: seq[DbRow]
+    if it.useCursor:
+      rows = it.adapter.fetchCursor(it.conn, it.cursorName, it.batchSize)
+    else:
+      # MariaDB emulation: LIMIT/OFFSET
+      let limitSql = it.bq.sql & " LIMIT " & $it.batchSize & " OFFSET " & $it.currentOffset
+      rows = it.adapter.query(it.conn, limitSql, it.bq.args)
+      it.currentOffset += it.batchSize
     if rows.len == 0:
       it.finished = true
       return none(T)
@@ -245,6 +255,7 @@ proc next*[T](it: var StreamIterator[T]): Option[T] =
 template stream*[T](repo: Repo, q: Query[T], batchSz: int = 100): StreamIterator[T] =
   ## Създава cursor-based stream за Query.
   ## Stream-ът задържа една връзка и една транзакция.
+  ## За MariaDB се емулира чрез LIMIT/OFFSET вместо server-side курсор.
   ## Задължително извикайте `close()` или използвайте `forStream` template.
   mixin schemaMeta, load
   block:
@@ -258,14 +269,17 @@ template stream*[T](repo: Repo, q: Query[T], batchSz: int = 100): StreamIterator
     iter.batchSize = bs
     iter.bufferIdx = 0
     iter.finished = false
+    iter.currentOffset = 0
+    iter.useCursor = a.supportsCursor()
     iter.bq = q.toBoundQuery()
     let uniqueId = epochTime().int64
     iter.cursorName = "necto_cursor_" & meta.tableName & "_" & $uniqueId
 
     try:
       a.beginTransaction(conn)
-      let cursorSql = "DECLARE " & quoteIdentifier(iter.cursorName) & " CURSOR FOR " & iter.bq.sql
-      a.exec(conn, cursorSql, iter.bq.args)
+      if iter.useCursor:
+        let cursorSql = "DECLARE " & quoteIdentifier(iter.cursorName) & " CURSOR FOR " & iter.bq.sql
+        a.exec(conn, cursorSql, iter.bq.args)
     except:
       repo.releaseConn(conn, a)
       raise
@@ -274,10 +288,12 @@ template stream*[T](repo: Repo, q: Query[T], batchSz: int = 100): StreamIterator
 
 proc close*[T](it: var StreamIterator[T]) =
   ## Затваря курсора и освобождава връзката.
+  ## За MariaDB (LIMIT/OFFSET emulation) просто commit-ва транзакцията.
   if it.conn == nil:
     return
   try:
-    it.adapter.exec(it.conn, "CLOSE " & quoteIdentifier(it.cursorName))
+    if it.useCursor:
+      it.adapter.exec(it.conn, "CLOSE " & quoteIdentifier(it.cursorName))
     it.adapter.commitTransaction(it.conn)
   except:
     discard
@@ -785,14 +801,19 @@ template insert_all*(repo: Repo, changesets: auto): auto =
 
         let sql = "INSERT INTO " & quoteIdentifier(meta.tableName) & " (" &
                   columns.join(", ") & ") VALUES " &
-                  rowGroups.join(", ") & " RETURNING *"
+                  rowGroups.join(", ")
         # --------------------------------------
 
-        let rows = repo.adapter.query(conn, sql, allValues)
-        var res: seq[ItemType] = @[]
-        for row in rows:
-          res.add(load(row, ItemType))
-        res
+        if repo.adapter.supportsReturning():
+          let rows = repo.adapter.query(conn, sql & " RETURNING *", allValues)
+          var res: seq[ItemType] = @[]
+          for row in rows:
+            res.add(load(row, ItemType))
+          res
+        else:
+          repo.adapter.exec(conn, sql, allValues)
+          var res: seq[ItemType] = @[]
+          res
       except DatabaseError as e:
         var ce = new(ConstraintError)
         ce.msg = e.msg
@@ -849,13 +870,18 @@ template insert_all*[T](repo: Repo, typ: typedesc[T], entries: seq[Table[string,
 
         let sql = "INSERT INTO " & quoteIdentifier(meta.tableName) & " (" &
                   columns.join(", ") & ") VALUES " &
-                  rowGroups.join(", ") & " RETURNING *"
+                  rowGroups.join(", ")
 
-        let rows = repo.adapter.query(conn, sql, allValues)
-        var res: seq[T] = @[]
-        for row in rows:
-          res.add(load(row, T))
-        res
+        if repo.adapter.supportsReturning():
+          let rows = repo.adapter.query(conn, sql & " RETURNING *", allValues)
+          var res: seq[T] = @[]
+          for row in rows:
+            res.add(load(row, T))
+          res
+        else:
+          repo.adapter.exec(conn, sql, allValues)
+          var res: seq[T] = @[]
+          res
       except DatabaseError as e:
         var ce = new(ConstraintError)
         ce.msg = e.msg
@@ -1209,9 +1235,10 @@ macro necto_repo*(name: untyped, body: untyped): untyped =
   ))
 
   # Build the constructor body AST manually to avoid quote interpolation issues
+  let newAdapterProc = newIdentNode("new" & adapterType.strVal)
   var ctorBody = newStmtList()
   ctorBody.add(newVarStmt(newIdentNode("adapter"),
-    newCall(newIdentNode("newPostgresAdapter"),
+    newCall(newAdapterProc,
       hostVal, userVal, passVal, dbVal, portVal, poolSizeVal
     )
   ))
@@ -1220,7 +1247,7 @@ macro necto_repo*(name: untyped, body: untyped): untyped =
     let rp = if readPortVal != nil: readPortVal else: portVal
     let rps = if readPoolSizeVal != nil: readPoolSizeVal else: poolSizeVal
     ctorBody.add(newVarStmt(newIdentNode("readAdapter"),
-      newCall(newIdentNode("newPostgresAdapter"),
+      newCall(newAdapterProc,
         readHostVal, userVal, passVal, dbVal, rp, rps
       )
     ))

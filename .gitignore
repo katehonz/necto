@@ -71,3 +71,5 @@ tests/t_tenant
 src/necto/auth
 tests/t_fts
 tests/t_subqueries
+tests/t_mariadb
+tests/t_sqlite

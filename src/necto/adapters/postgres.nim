@@ -76,6 +76,7 @@ proc newPostgresAdapter*(host, user, password, database: string;
     password: password,
     database: database,
     poolSize: poolSize,
+    dialect: pdPostgres,
     maxConns: poolSize,
     activeConns: 0,
     stmtCounter: 0,

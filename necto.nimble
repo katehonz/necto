@@ -39,3 +39,9 @@ task test, "Run all test suites":
 
 task test_postgres, "Run PostgreSQL tests":
   exec "testament pattern 'tests/t_*.nim'"
+
+task test_mariadb, "Run MariaDB tests":
+  exec "nim c -r --path:src tests/t_mariadb.nim"
+
+task test_sqlite, "Run SQLite tests":
+  exec "nim c -r --path:src tests/t_sqlite.nim"
