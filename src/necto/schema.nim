@@ -54,11 +54,12 @@ type
 
   SchemaMeta* = object
     tableName*: string
-    schemaPrefix*: string  ## schema_prefix (за multi-tenant)
+    schemaPrefix*: string  ## schema_prefix (за multi-tenant schema isolation)
     fields*: seq[FieldMeta]
     primaryKeyField*: string
     associations*: seq[AssocMeta]
     softDeletes*: bool  ## Ако true, schema-та поддържа soft deletes
+    tenantIdColumn*: string  ## Ако non-empty, row-level tenant filter по тази колона
 
 # --- Reflection helpers ---
 
@@ -210,6 +211,7 @@ macro necto_schema*(name: untyped, body: untyped): untyped =
   var hasVerify = false
   var hasSoftDeletes = false
   var schemaPrefix = ""
+  var tenantIdColumn = ""
   var verifyFields: seq[(string, string, string, string, bool, bool, bool)] = @[]
   var staticFkCheckNodes: seq[NimNode] = @[]
 
@@ -217,7 +219,10 @@ macro necto_schema*(name: untyped, body: untyped): untyped =
     if child.kind == nnkIdent:
       # Обработка на идентификатори без Command wrapper (напр. `timestamps`)
       let cmdName = $child
-      if cmdName == "timestamps":
+      if cmdName == "tenant_id" or cmdName == "tenant_scoped":
+        # Bare form: tenant_id  → column "tenant_id"
+        tenantIdColumn = "tenant_id"
+      elif cmdName == "timestamps":
         for tsField in ["created_at", "updated_at"]:
           let fi = newIdentNode(tsField)
           fieldDefs.add(newIdentDefs(fi, newIdentNode("DateTime")))
@@ -280,6 +285,13 @@ macro necto_schema*(name: untyped, body: untyped): untyped =
 
       elif cmdName == "schema_prefix":
         schemaPrefix = $child[1]
+
+      elif cmdName == "tenant_id" or cmdName == "tenant_scoped":
+        # tenant_id "organization_id"  or  tenant_scoped "org_id"
+        if child.len >= 2:
+          tenantIdColumn = $child[1]
+        else:
+          tenantIdColumn = "tenant_id"
 
       elif cmdName == "field":
         ## AST: Command(Ident "field", Ident "fieldName", StmtList(<type-expr>))
@@ -659,7 +671,8 @@ macro necto_schema*(name: untyped, body: untyped): untyped =
           newTree(nnkPrefix, newIdentNode("@"), newTree(nnkBracket))
         ),
         nnkExprColonExpr.newTree(newIdentNode("softDeletes"), newLit(hasSoftDeletes)),
-        nnkExprColonExpr.newTree(newIdentNode("schemaPrefix"), newLit(schemaPrefix))
+        nnkExprColonExpr.newTree(newIdentNode("schemaPrefix"), newLit(schemaPrefix)),
+        nnkExprColonExpr.newTree(newIdentNode("tenantIdColumn"), newLit(tenantIdColumn))
       )
     )
   )

@@ -117,7 +117,7 @@ Ecto е златен стандарт заради **10 години зряло�
 - [x] **3.6 Full-text search helper** — `whereTsVectorMatches`, `toTsVector`, `plaintoTsQuery`, `tsRank`, `tsRankCd`
 - [x] **3.7 Migration rollback с checksum валидация** + advisory lock
 - [x] **3.8 Soft deletes** — `soft_deletes` в schema, `includeDeleted`/`onlyDeleted`/`hardDelete` query modifiers
-- [ ] **3.9 Multi-tenant support** — `schema_prefix` / `tenant_id` filtering
+- [x] **3.9 Multi-tenant support** — `schema_prefix` + row-level `tenant_id` filtering (`setTenantId`, auto WHERE, insert inject)
 - [x] **3.10 Streaming** — `StreamIterator[T]`, `forStream` template с автоматичен connection cleanup
 
 **Критерий за успех:** Пример production app с docker-compose (app + postgres + prometheus).
@@ -129,8 +129,8 @@ Ecto е златен стандарт заради **10 години зряло�
 Цел: Community, visibility, integration.
 
 - [ ] **4.1 Интеграция с Karax** — форми генерират Changeset директно
-- [ ] **4.2 Интеграция с Jester/Prologue/Mummy** — middleware за Repo context
-- [x] **4.3 Auth/Identity модул** — bcrypt пароли, JWT токени (генериране, валидация, refresh), `tokenUserId`, `tokenExpiry`
+- [x] **4.2 Web request helpers** — framework-agnostic `RequestContext`, Bearer auth, tenant scope (`necto/web.nim`); Jester/Prologue/Mummy wire-up examples still welcome
+- [x] **4.3 Auth/Identity модул** — bcrypt пароли, JWT токени (генериране, валидация, refresh), `tokenUserId`, `tokenExpiry` (exported from `import necto`)
 - [ ] **4.4 Документация** — mkdocs с автоматично генериран API reference
 - [ ] **4.5 Benchmarks публикувани** — сравнение с Ecto, Avram, Norm, Diesel, SQLx
 - [ ] **4.6 nimble пакет** — `nimble install necto` работи перфектно

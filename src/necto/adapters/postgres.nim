@@ -27,6 +27,8 @@ type
     # Prepared statement cache (per-adapter, shared across connections)
     prepLock: Lock
     preparedCache: Table[string, string]  # sql → stmtName
+    # Per-physical-connection prepared stmt name map (survives checkout/checkin)
+    connPrepCache: Table[pointer, Table[string, string]]
     stmtCounter: int
     # Metrics
     metricsTotalRequests: int64
@@ -81,6 +83,7 @@ proc newPostgresAdapter*(host, user, password, database: string;
     activeConns: 0,
     stmtCounter: 0,
     preparedCache: initTable[string, string](),
+    connPrepCache: initTable[pointer, Table[string, string]](),
     metricsTotalRequests: 0,
     metricsTotalWaitNs: 0,
     metricsMaxWaitNs: 0,
@@ -257,15 +260,25 @@ proc pgAffected(a: PostgresAdapter, conn: PgConnection, sql: string, args: seq[s
 
 method connect*(a: PostgresAdapter): Connection =
   ## Връща PgConnection с checkout-ната връзка.
+  ## Възстановява per-connection prepared statement cache, за да не re-prepare-ваме
+  ## едни и същи SQL при всеки checkout.
   let db = a.checkout()
-  PgConnection(dbConn: db, preparedStmts: initTable[string, string]())
+  var cache = initTable[string, string]()
+  let key = cast[pointer](db)
+  withLock a.prepLock:
+    if a.connPrepCache.hasKey(key):
+      cache = a.connPrepCache[key]
+  PgConnection(dbConn: db, preparedStmts: cache)
 
 method disconnect*(a: PostgresAdapter, conn: Connection) =
   ## Връща връзката обратно в пула.
   ## Изпълнява ROLLBACK ако сме в транзакция.
-  ## НЕ деалокира prepared statements — те остават за reuse при следващ checkout.
+  ## Запазва prepared statement cache за reuse при следващ checkout.
   let pgConn = PgConnection(conn)
   if pgConn.dbConn != nil:
+    let key = cast[pointer](pgConn.dbConn)
+    withLock a.prepLock:
+      a.connPrepCache[key] = pgConn.preparedStmts
     let txStatus = libpq.pqtransactionStatus(pgConn.dbConn)
     if txStatus in {libpq.PQTRANS_INTRANS, libpq.PQTRANS_INERROR}:
       try:

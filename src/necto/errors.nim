@@ -32,3 +32,6 @@ type
   ConstraintError* = object of NectoError
     ## Вдигнато при нарушение на DB constraint (unique, foreign key, check).
     constraintName*: string
+
+  UnauthorizedError* = object of NectoError
+    ## Вдигнато при липсващ/невалиден auth token (web middleware).

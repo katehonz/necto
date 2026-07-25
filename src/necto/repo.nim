@@ -45,10 +45,36 @@ proc setThreadLocalConn*(conn: Connection) = threadLocalConn = conn
 
 # Tenant aliases (дефинирани в query.nim, re-export за удобство)
 proc setTenant*(repo: Repo, tenant: string) =
+  ## Задава runtime PostgreSQL schema prefix (schema isolation).
   setQueryTenant(tenant)
 
 proc clearTenant*(repo: Repo) =
+  ## Изчиства runtime schema prefix.
   clearQueryTenant()
+
+proc setTenantId*(repo: Repo, id: string) =
+  ## Задава row-level tenant id (автоматичен WHERE tenant_id = …).
+  setQueryTenantId(id)
+
+proc clearTenantId*(repo: Repo) =
+  ## Изчиства row-level tenant id.
+  clearQueryTenantId()
+
+proc tenantScope*(repo: Repo, schemaPrefix = "", tenantId = "") =
+  ## Задава и schema prefix, и/или row-level tenant id наведнъж.
+  if schemaPrefix.len > 0:
+    setQueryTenant(schemaPrefix)
+  else:
+    clearQueryTenant()
+  if tenantId.len > 0:
+    setQueryTenantId(tenantId)
+  else:
+    clearQueryTenantId()
+
+proc clearTenantScope*(repo: Repo) =
+  ## Изчиства и schema prefix, и row-level tenant id.
+  clearQueryTenant()
+  clearQueryTenantId()
 
 proc inTransaction*(repo: Repo): bool =
   ## Връща true ако сме в транзакция.
@@ -148,6 +174,45 @@ template one*[T](repo: Repo, q: Query[T]): Option[T] =
         some(res[0])
       else:
         none(T)
+    finally:
+      repo.releaseConn(conn, a)
+
+template first*[T](repo: Repo, q: Query[T]): Option[T] =
+  ## Alias на `one` — първият ред или none.
+  one(repo, q)
+
+template exists*[T](repo: Repo, q: Query[T]): bool =
+  ## True ако има поне един ред, отговарящ на заявката.
+  block:
+    let conn = repo.getReadConn()
+    let a = if repo.readAdapter != nil: repo.readAdapter else: repo.adapter
+    try:
+      var q2 = q.limit(1)
+      # drop order/preload/lock for cheaper existence check; raw `1` avoids quoting
+      q2.selectFields = @["1"]
+      q2.orderClauses = @[]
+      q2.preloadAssocs = @[]
+      q2.lockMode = lmNone
+      let bq = q2.toBoundQuery()
+      let rows = a.query(conn, bq.sql, bq.args)
+      rows.len > 0
+    finally:
+      repo.releaseConn(conn, a)
+
+template pluck*[T](repo: Repo, q: Query[T], field: string): seq[string] =
+  ## Връща само стойностите на една колона като `seq[string]`.
+  ## Пример: `repo.pluck(fromSchema(User).where("age", Gte, 18), "email")`
+  block:
+    let conn = repo.getReadConn()
+    let a = if repo.readAdapter != nil: repo.readAdapter else: repo.adapter
+    try:
+      let bq = q.select(field).toBoundQuery()
+      let rows = a.query(conn, bq.sql, bq.args)
+      var res: seq[string] = @[]
+      for row in rows:
+        if row.len > 0:
+          res.add(row[0])
+      res
     finally:
       repo.releaseConn(conn, a)
 
@@ -425,6 +490,7 @@ proc buildInsertSql(cs: auto, meta: SchemaMeta; onConflict: OnConflict = OnConfl
   var placeholders: seq[string] = @[]
   var values: seq[string] = @[]
   var idx = 1
+  var hasTenantCol = false
 
   for key, val in cs.changes.pairs():
     var fieldKnown = false
@@ -445,6 +511,16 @@ proc buildInsertSql(cs: auto, meta: SchemaMeta; onConflict: OnConflict = OnConfl
     placeholders.add("$" & $idx)
     values.add(val)
     inc idx
+    if meta.tenantIdColumn.len > 0 and (f.dbColumn == meta.tenantIdColumn or f.name == meta.tenantIdColumn):
+      hasTenantCol = true
+
+  # Auto-inject current tenant_id when schema is tenant-scoped
+  let tid = getQueryTenantId()
+  if meta.tenantIdColumn.len > 0 and tid.len > 0 and not hasTenantCol:
+    columns.add(quoteIdentifier(meta.tenantIdColumn))
+    placeholders.add("$" & $idx)
+    values.add(tid)
+    inc idx
 
   for f in meta.fields:
     if f.isTimestamp and not cs.changes.hasKey(f.name):
@@ -454,7 +530,7 @@ proc buildInsertSql(cs: auto, meta: SchemaMeta; onConflict: OnConflict = OnConfl
       values.add(nowStr)
       inc idx
 
-  var sql = "INSERT INTO " & quoteIdentifier(meta.tableName) & " (" &
+  var sql = "INSERT INTO " & qualifiedTableName(meta) & " (" &
             columns.join(", ") & ") VALUES (" & placeholders.join(", ") & ")"
 
   # --- ON CONFLICT ---
@@ -542,9 +618,15 @@ template buildUpdateSql(cs: auto, meta: SchemaMeta): (string, seq[string]) =
       ("", @[])
     else:
       values.add(pkVal)
-      let whereClause = quoteIdentifier(meta.primaryKeyField) & " = $" & $idx
-      let sql = "UPDATE " & quoteIdentifier(meta.tableName) & " SET " &
-                sets.join(", ") & " WHERE " & whereClause
+      var whereParts = @[quoteIdentifier(meta.primaryKeyField) & " = $" & $idx]
+      inc idx
+      let tid = getQueryTenantId()
+      if meta.tenantIdColumn.len > 0 and tid.len > 0:
+        whereParts.add(quoteIdentifier(meta.tenantIdColumn) & " = $" & $idx)
+        values.add(tid)
+        inc idx
+      let sql = "UPDATE " & qualifiedTableName(meta) & " SET " &
+                sets.join(", ") & " WHERE " & whereParts.join(" AND ")
       (sql, values)
 
 proc buildDeleteSql(cs: auto, meta: SchemaMeta): (string, seq[string]) =
@@ -559,9 +641,14 @@ proc buildDeleteSql(cs: auto, meta: SchemaMeta): (string, seq[string]) =
   if pkVal.len == 0:
     raise newException(ValidationError, "Cannot delete without primary key value")
 
-  let sql = "DELETE FROM " & quoteIdentifier(meta.tableName) & " WHERE " &
-            quoteIdentifier(meta.primaryKeyField) & " = $1"
-  result = (sql, @[pkVal])
+  var args = @[pkVal]
+  var whereParts = @[quoteIdentifier(meta.primaryKeyField) & " = $1"]
+  let tid = getQueryTenantId()
+  if meta.tenantIdColumn.len > 0 and tid.len > 0:
+    whereParts.add(quoteIdentifier(meta.tenantIdColumn) & " = $2")
+    args.add(tid)
+  let sql = "DELETE FROM " & qualifiedTableName(meta) & " WHERE " & whereParts.join(" AND ")
+  result = (sql, args)
 
 proc buildSoftDeleteSql(cs: auto, meta: SchemaMeta): (string, seq[string]) =
   ## Генерира UPDATE SQL за soft delete.
@@ -575,9 +662,18 @@ proc buildSoftDeleteSql(cs: auto, meta: SchemaMeta): (string, seq[string]) =
   if pkVal.len == 0:
     raise newException(ValidationError, "Cannot soft-delete without primary key value")
 
-  let sql = "UPDATE " & quoteIdentifier(meta.tableName) & " SET " & quoteIdentifier("deleted_at") & " = NOW() WHERE " &
-            quoteIdentifier(meta.primaryKeyField) & " = $1 AND " & quoteIdentifier("deleted_at") & " IS NULL"
-  result = (sql, @[pkVal])
+  var args = @[pkVal]
+  var whereParts = @[
+    quoteIdentifier(meta.primaryKeyField) & " = $1",
+    quoteIdentifier("deleted_at") & " IS NULL"
+  ]
+  let tid = getQueryTenantId()
+  if meta.tenantIdColumn.len > 0 and tid.len > 0:
+    whereParts.add(quoteIdentifier(meta.tenantIdColumn) & " = $2")
+    args.add(tid)
+  let sql = "UPDATE " & qualifiedTableName(meta) & " SET " & quoteIdentifier("deleted_at") &
+            " = NOW() WHERE " & whereParts.join(" AND ")
+  result = (sql, args)
 
 # --- Constraint Error Handling (Ecto pattern) ---
 
@@ -627,7 +723,7 @@ template insert*[T](repo: Repo, cs: Changeset[T]): T =
       let meta = schemaMeta(T)
       let (sql, args) = buildInsertSql(cs, meta)
       let newId = repo.adapter.insertReturning(conn, sql, meta.primaryKeyField, args)
-      let loadSql = "SELECT * FROM " & quoteIdentifier(meta.tableName) &
+      let loadSql = "SELECT * FROM " & qualifiedTableName(meta) &
                     " WHERE " & quoteIdentifier(meta.primaryKeyField) & " = $1"
       let rows = repo.adapter.query(conn, loadSql, @[$newId])
       if rows.len > 0:
@@ -682,7 +778,7 @@ template insert*[T](repo: Repo, cs: Changeset[T], onConflict: OnConflict): T =
       if hasRealPk:
         # При upsert знаем PK и можем да load-нем директно
         repo.adapter.exec(conn, sql, args)
-        let loadSql = "SELECT * FROM " & quoteIdentifier(meta.tableName) &
+        let loadSql = "SELECT * FROM " & qualifiedTableName(meta) &
                       " WHERE " & quoteIdentifier(meta.primaryKeyField) & " = $1"
         let rows = repo.adapter.query(conn, loadSql, @[pkVal])
         if rows.len > 0:
@@ -701,7 +797,7 @@ template insert*[T](repo: Repo, cs: Changeset[T], onConflict: OnConflict): T =
           else:
             raise
         if newId > 0:
-          let loadSql = "SELECT * FROM " & quoteIdentifier(meta.tableName) &
+          let loadSql = "SELECT * FROM " & qualifiedTableName(meta) &
                         " WHERE " & quoteIdentifier(meta.primaryKeyField) & " = $1"
           let rows = repo.adapter.query(conn, loadSql, @[$newId])
           if rows.len > 0:
@@ -799,7 +895,7 @@ template insert_all*(repo: Repo, changesets: auto): auto =
             inc idx
           rowGroups.add("(" & rowPlaceholders.join(", ") & ")")
 
-        let sql = "INSERT INTO " & quoteIdentifier(meta.tableName) & " (" &
+        let sql = "INSERT INTO " & qualifiedTableName(meta) & " (" &
                   columns.join(", ") & ") VALUES " &
                   rowGroups.join(", ")
         # --------------------------------------
@@ -868,7 +964,7 @@ template insert_all*[T](repo: Repo, typ: typedesc[T], entries: seq[Table[string,
             inc idx
           rowGroups.add("(" & rowPlaceholders.join(", ") & ")")
 
-        let sql = "INSERT INTO " & quoteIdentifier(meta.tableName) & " (" &
+        let sql = "INSERT INTO " & qualifiedTableName(meta) & " (" &
                   columns.join(", ") & ") VALUES " &
                   rowGroups.join(", ")
 
@@ -944,13 +1040,8 @@ template update_all*[T](repo: Repo, q: Query[T], changes: Table[string, string])
 
       let bq = q.toBoundQuery()
       # Заменяме SELECT ... с UPDATE ... SET ... WHERE ...
-      let fromIdx = bq.sql.find(" FROM ")
       let whereIdx = bq.sql.find(" WHERE ")
-      var tablePart = if fromIdx >= 0: bq.sql[fromIdx + 6 ..< (if whereIdx >= 0: whereIdx else: bq.sql.len)] else: meta.tableName
-      if tablePart.startsWith("\"") and tablePart.endsWith("\""):
-        tablePart = tablePart[1 ..< tablePart.len - 1]
-      
-      var sql = "UPDATE " & quoteIdentifier(tablePart) & " SET " & sets.join(", ")
+      var sql = "UPDATE " & qualifiedTableName(meta) & " SET " & sets.join(", ")
       if whereIdx >= 0:
         let whereSql = renumberPlaceholders(bq.sql[whereIdx..^1], idx - 1)
         sql.add(" " & whereSql)
@@ -971,13 +1062,8 @@ template delete_all*[T](repo: Repo, q: Query[T]): int64 =
     try:
       let meta = schemaMeta(T)
       let bq = q.toBoundQuery()
-      let fromIdx = bq.sql.find(" FROM ")
       let whereIdx = bq.sql.find(" WHERE ")
-      var tablePart = if fromIdx >= 0: bq.sql[fromIdx + 6 ..< (if whereIdx >= 0: whereIdx else: bq.sql.len)] else: meta.tableName
-      if tablePart.startsWith("\"") and tablePart.endsWith("\""):
-        tablePart = tablePart[1 ..< tablePart.len - 1]
-      
-      var sql = "DELETE FROM " & quoteIdentifier(tablePart)
+      var sql = "DELETE FROM " & qualifiedTableName(meta)
       var args: seq[string] = @[]
       if whereIdx >= 0:
         sql.add(" " & bq.sql[whereIdx..^1])
@@ -1010,7 +1096,7 @@ template update*[T](repo: Repo, cs: Changeset[T]): T =
                 pkVal = cs.changes[f.name]
             break
         if pkVal.len > 0:
-          let loadSql = "SELECT * FROM " & quoteIdentifier(meta.tableName) &
+          let loadSql = "SELECT * FROM " & qualifiedTableName(meta) &
                         " WHERE " & quoteIdentifier(meta.primaryKeyField) & " = $1"
           let rows = repo.adapter.query(conn, loadSql, @[pkVal])
           if rows.len > 0:
@@ -1035,7 +1121,7 @@ template update*[T](repo: Repo, cs: Changeset[T]): T =
               except:
                 discard
               break
-        let loadSql = "SELECT * FROM " & quoteIdentifier(meta.tableName) &
+        let loadSql = "SELECT * FROM " & qualifiedTableName(meta) &
                       " WHERE " & quoteIdentifier(meta.primaryKeyField) & " = $1"
         let rows = repo.adapter.query(conn, loadSql, @[pkVal])
         if rows.len > 0:

@@ -7,11 +7,12 @@
 ```nim
 import necto
 
-# Composable, type-safe query
+# Composable, type-safe query (typed where values, pagination)
 let users = repo.all(
-  Query.fromSchema(User)
-    .where("age", Gte, "18")
+  fromSchema(User)
+    .where("age", Gte, 18)
     .orderBy("name", Asc)
+    .paginate(1, 20)
 )
 
 # Changeset-driven writes
@@ -20,6 +21,10 @@ let cs = newChangeset(newUser(), {"name": "Ivan", "email": "ivan@test.com"}.toTa
   .validateRequired(@["name", "email"])
 if cs.isValid:
   let user = repo.insert!(cs)
+
+# Row-level multi-tenant + JWT auth
+repo.setTenantId("acme")
+let token = generateToken(defaultAuthConfig(secret), "user-1")
 ```
 
 ---
@@ -32,13 +37,16 @@ The Crystal community built **Avram** — an Ecto-like ORM that made the languag
 |---------|-------|------|--------------|
 | Repository Pattern | ✅ | ⚠️ | ❌ |
 | Multi-database (PG, MySQL, SQLite) | ✅ | ❌ | ⚠️ |
+| Multi-tenant (`schema_prefix` + `tenant_id`) | ✅ | ❌ | ⚠️ |
 | Composable queries | ✅ | ❌ | ⚠️ |
 | Subqueries (IN, EXISTS) | ✅ | ❌ | ✅ |
 | CTEs (WITH) | ✅ | ❌ | ✅ |
+| Row locks (`FOR UPDATE`) | ✅ | ❌ | ✅ |
 | Changeset validations | ✅ | ❌ | ⚠️ |
 | Type-safe preload | ✅ | ❌ | ❌ |
 | Auto-preload macros | ✅ | ❌ | ❌ |
 | Batch insert/update/delete | ✅ | ❌ | ✅ |
+| Auth (bcrypt + JWT) + web helpers | ✅ | ❌ | ⚠️ |
 | Pipe operator (Elixir-style) | ✅ | ❌ | ❌ |
 | Reverse schema generation | ✅ | ❌ | ❌ |
 | Lazy loading | ❌ *(by design)* | ✅ | ✅ |

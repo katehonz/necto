@@ -297,7 +297,11 @@ necto_schema User:
   embeds_many addresses: Address
 ```
 
-## Multi-Tenant (schema_prefix)
+## Multi-Tenant
+
+Necto supports two multi-tenant strategies (they can be combined):
+
+### 1. Schema isolation (`schema_prefix`)
 
 Route queries to different PostgreSQL schemas:
 
@@ -315,6 +319,35 @@ Runtime override:
 repo.setTenant("tenant_99")
 let posts = repo.all(fromSchema(Post))  # → "tenant_99"."posts"
 repo.clearTenant()  # back to schema_prefix
+```
+
+### 2. Row-level (`tenant_id`)
+
+Automatic `WHERE tenant_id = $N` on all queries + auto-inject on insert:
+
+```nim
+necto_schema Post:
+  table "posts"
+  tenant_id                    # column defaults to "tenant_id"
+  # tenant_id "organization_id"  # custom column name
+  field id: int64 {.primary_key.}
+  field tenant_id: string
+  field title: string
+```
+
+```nim
+repo.setTenantId("acme")
+let posts = repo.all(fromSchema(Post))          # WHERE "tenant_id" = 'acme'
+let all = repo.all(fromSchema(Post).withoutTenant())  # skip filter
+
+# insert auto-fills tenant_id when not in changeset
+var cs = newChangeset(newPost(), {"title": "Hello"}.toTable).castFields(@["title"])
+let post = repo.insert(cs)  # tenant_id = "acme"
+
+repo.clearTenantId()
+# or both at once:
+repo.tenantScope(schemaPrefix = "tenant_a", tenantId = "acme")
+repo.clearTenantScope()
 ```
 
 ## Reverse Schema Generation

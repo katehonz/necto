@@ -26,6 +26,15 @@ let q = fromSchema(User)
   .where("name", Like, "Ivan%")
 ```
 
+Typed values (no manual `$` / string conversion):
+
+```nim
+let q = fromSchema(User)
+  .where("age", Gte, 18)          # int
+  .where("active", Eq, true)      # bool
+  .where("score", Gt, 3.5)        # float
+```
+
 Supported operators:
 
 | Operator | SQL |
@@ -48,8 +57,16 @@ Multiple `where` calls are joined with `AND`.
 
 ```nim
 let q = fromSchema(User)
-  .where("active", Eq, "true")
+  .where("active", Eq, true)
   .orWhere("role", Eq, "admin")
+```
+
+### whereIn / whereNotIn (values)
+
+```nim
+let q = fromSchema(User).whereIn("id", ["1", "2", "3"])
+let q2 = fromSchema(User).whereNotIn("status", ["banned", "deleted"])
+# empty list → always false (whereIn) / always true (whereNotIn)
 ```
 
 ### orderBy
@@ -59,10 +76,31 @@ let q = fromSchema(User).orderBy("name", Asc)
 let q2 = fromSchema(User).orderBy("created_at", Desc)
 ```
 
-### limit / offset
+### limit / offset / paginate
 
 ```nim
 let q = fromSchema(User).limit(10).offset(20)
+
+# 1-based pagination (page 1 = first page)
+let page = fromSchema(User).orderBy("id", Asc).paginate(2, perPage = 25)
+# → LIMIT 25 OFFSET 25
+```
+
+### Row locks (FOR UPDATE / FOR SHARE)
+
+Use inside a transaction:
+
+```nim
+repo.transaction:
+  let u = repo.one(fromSchema(User).where("id", Eq, 1).forUpdate())
+  # … mutate …
+
+# variants:
+.forUpdate(noWait = true)
+.forUpdate(skipLocked = true)
+.forShare()
+.forNoKeyUpdate()
+.forKeyShare()
 ```
 
 ### distinct
@@ -101,24 +139,41 @@ Checks that `age` and `name` are real fields at compile-time. Supports `and`/`or
 ### all
 
 ```nim
-let users = repo.all(fromSchema(User).where("active", Eq, "true"))
+let users = repo.all(fromSchema(User).where("active", Eq, true))
 ```
 
-### one
+### one / first
 
-Returns `Option[T]`.
+Returns `Option[T]`. `first` is an alias of `one`.
 
 ```nim
 let maybeUser = repo.one(fromSchema(User).where("email", Eq, "a@b.com"))
 if maybeUser.isSome:
   echo maybeUser.get().name
+
+let same = repo.first(fromSchema(User).where("id", Eq, 1))
+```
+
+### exists
+
+```nim
+if repo.exists(fromSchema(User).where("email", Eq, "a@b.com")):
+  echo "taken"
+```
+
+### pluck
+
+Returns a single column as `seq[string]`:
+
+```nim
+let emails = repo.pluck(fromSchema(User).where("active", Eq, true), "email")
 ```
 
 ### count
 
 ```nim
 let total = repo.count(fromSchema(User))
-let active = repo.count(fromSchema(User).where("active", Eq, "true"))
+let active = repo.count(fromSchema(User).where("active", Eq, true))
 ```
 
 ## Compiled Query Cache

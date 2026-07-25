@@ -8,6 +8,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Row-level multi-tenancy (`tenant_id`)**: `tenant_id` / `tenant_scoped` in schema, `repo.setTenantId` / `clearTenantId` / `tenantScope`, automatic `WHERE` filter + insert injection, `withoutTenant()` escape hatch.
+- **Query DX**:
+  - Typed `where` / `orWhere` for `int`, `float`, `bool` (no manual string conversion).
+  - `paginate(page, perPage)` — 1-based pagination helper.
+  - `forUpdate` / `forShare` / `forNoKeyUpdate` / `forKeyShare` with `NOWAIT` / `SKIP LOCKED`.
+  - `whereIn` / `whereNotIn` with value lists (in addition to subqueries).
+  - `repo.pluck`, `repo.first`, `repo.exists`.
+- **Auth + web helpers**: `auth` and `web` exported from `import necto`.
+  - `extractBearerToken`, `authenticateBearer`, `RequestContext`, `withRequestScope`, `requireUser`.
+- **`UnauthorizedError`** for missing/invalid bearer tokens.
+
+### Fixed
+- **Prepared statement cache reuse**: per-physical-connection cache now survives checkout/checkin (fewer re-prepares).
+- **CTE placeholder renumbering**: replaced hardcoded 30-placeholder loop with `shiftPlaceholders` (handles arbitrary arg counts safely).
+- **`whereDynamic` with zero-arg fragments**: fragments like `1 = 0` no longer get identifier-quoted (fixes empty `whereIn` lists).
+- **Qualified table names** on INSERT/UPDATE/DELETE when `schema_prefix` / runtime tenant is set.
+
+### Added (earlier unreleased)
 - **Multi-database support**: MariaDB/MySQL and SQLite adapters alongside PostgreSQL.
   - `MariaDbAdapter` in `necto/adapters/mariadb` — connection pooling, `$N` → `?` translation, `LAST_INSERT_ID()` emulation.
   - `SqliteAdapter` in `necto/adapters/sqlite` — single shared connection with locking, `$N` → `?` translation, `last_insert_rowid()` emulation.
@@ -21,7 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `CHANGELOG.md` and `CONTRIBUTING.md`.
 
 ### Changed
-- Bumped version in `necto.nimble` from `0.1.0` to `0.3.0` to reflect the implemented feature set.
+- Bumped version in `necto.nimble` to `0.3.2`.
 - Updated `tests/support/test_repo.nim` to read database credentials from environment variables (`NECTO_HOST`, `NECTO_USER`, `NECTO_PASSWORD`, `NECTO_DATABASE`) for CI compatibility.
 - Updated `PLAN.md` with a disclaimer pointing to `ROADMAP.md` and `docs/`, and fixed references to non-existent files (`query_builder.nim`, `query_dsl.nim`, `preloader.nim`).
 

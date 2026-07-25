@@ -68,6 +68,9 @@ type
     fragmentArgs*: seq[string]  ## args from SqlFragment
     isRawField*: bool  ## Ако true, `field` се използва директно без кавички.
 
+  LockMode* = enum
+    lmNone, lmForUpdate, lmForShare, lmForNoKeyUpdate, lmForKeyShare
+
   Query*[T] = object
     ## Структура, която натрупва SQL фрагменти.
     selectFields*: seq[string]
@@ -82,8 +85,12 @@ type
     groupByFields*: seq[string]
     havingClauses*: seq[HavingClause]
     includeDeletedVal*: bool  ## За soft deletes: включва изтрити редове
+    skipTenantVal*: bool  ## Пропуска row-level tenant_id филтъра
     windowFunctions*: seq[string]  ## Window function SQL изрази
     ctes*: seq[CteClause]  ## CTE (WITH) клаузи
+    lockMode*: LockMode
+    lockNoWait*: bool
+    lockSkipLocked*: bool
 
   CteClause* = object
     ## CTE дефиниция: WITH name AS (query)
@@ -114,10 +121,31 @@ proc where*[T](q: Query[T], field: string, op: WhereOp, value: string): Query[T]
   result = q
   result.whereClauses.add(WhereClause(field: field, op: op, value: value, conjunction: "AND"))
 
+proc where*[T](q: Query[T], field: string, op: WhereOp, value: SomeInteger): Query[T] =
+  ## Typed where за цели числа — без ръчно `$value`.
+  where(q, field, op, $value)
+
+proc where*[T](q: Query[T], field: string, op: WhereOp, value: SomeFloat): Query[T] =
+  ## Typed where за float стойности.
+  where(q, field, op, $value)
+
+proc where*[T](q: Query[T], field: string, op: WhereOp, value: bool): Query[T] =
+  ## Typed where за bool (PostgreSQL `true`/`false`).
+  where(q, field, op, if value: "true" else: "false")
+
 proc orWhere*[T](q: Query[T], field: string, op: WhereOp, value: string): Query[T] =
   ## Добавя условие с OR конюнкция.
   result = q
   result.whereClauses.add(WhereClause(field: field, op: op, value: value, conjunction: "OR"))
+
+proc orWhere*[T](q: Query[T], field: string, op: WhereOp, value: SomeInteger): Query[T] =
+  orWhere(q, field, op, $value)
+
+proc orWhere*[T](q: Query[T], field: string, op: WhereOp, value: SomeFloat): Query[T] =
+  orWhere(q, field, op, $value)
+
+proc orWhere*[T](q: Query[T], field: string, op: WhereOp, value: bool): Query[T] =
+  orWhere(q, field, op, if value: "true" else: "false")
 
 proc orderBy*[T](q: Query[T], field: string, dir: OrderDirection = Asc): Query[T] =
   result = q
@@ -140,6 +168,13 @@ proc offset*[T](q: Query[T], n: int): Query[T] =
   result = q
   result.offsetVal = some(n)
 
+proc paginate*[T](q: Query[T], page: int, perPage: int = 20): Query[T] =
+  ## 1-based pagination: page 1 → OFFSET 0, page 2 → OFFSET perPage, …
+  ## `page` и `perPage` се clam-ват до минимум 1.
+  let p = max(1, page)
+  let pp = max(1, perPage)
+  result = q.limit(pp).offset((p - 1) * pp)
+
 proc setDistinct*[T](q: Query[T]): Query[T] =
   result = q
   result.distinctVal = true
@@ -160,6 +195,39 @@ proc onlyDeleted*[T](q: Query[T]): Query[T] =
   result.whereClauses.add(WhereClause(
     field: "deleted_at", op: NotNull, value: "", conjunction: "AND"
   ))
+
+proc withoutTenant*[T](q: Query[T]): Query[T] =
+  ## Пропуска автоматичния tenant_id филтър за тази заявка.
+  result = q
+  result.skipTenantVal = true
+
+proc forUpdate*[T](q: Query[T]; noWait = false; skipLocked = false): Query[T] =
+  ## Добавя `FOR UPDATE` (row lock). Използвай вътре в транзакция.
+  result = q
+  result.lockMode = lmForUpdate
+  result.lockNoWait = noWait
+  result.lockSkipLocked = skipLocked and not noWait
+
+proc forShare*[T](q: Query[T]; noWait = false; skipLocked = false): Query[T] =
+  ## Добавя `FOR SHARE` (shared lock).
+  result = q
+  result.lockMode = lmForShare
+  result.lockNoWait = noWait
+  result.lockSkipLocked = skipLocked and not noWait
+
+proc forNoKeyUpdate*[T](q: Query[T]; noWait = false; skipLocked = false): Query[T] =
+  ## Добавя `FOR NO KEY UPDATE`.
+  result = q
+  result.lockMode = lmForNoKeyUpdate
+  result.lockNoWait = noWait
+  result.lockSkipLocked = skipLocked and not noWait
+
+proc forKeyShare*[T](q: Query[T]; noWait = false; skipLocked = false): Query[T] =
+  ## Добавя `FOR KEY SHARE`.
+  result = q
+  result.lockMode = lmForKeyShare
+  result.lockNoWait = noWait
+  result.lockSkipLocked = skipLocked and not noWait
 
 # --- Join операции ---
 
@@ -318,13 +386,15 @@ proc whereDynamic*[T](q: Query[T], frag: SqlFragment): Query[T] =
   ## Добавя raw SQL фрагмент като WHERE условие.
   ## Placeholders `$1`, `$2` … във фрагмента се преномерират автоматично
   ## при генериране на SQL (`toBoundQuery`).
+  ## Работи и с фрагменти без args (напр. `1 = 0`).
   result = q
   result.whereClauses.add(WhereClause(
     field: frag.sql,
-    op: Eq,
+    op: Raw,
     value: "",
     conjunction: "AND",
-    fragmentArgs: frag.args
+    fragmentArgs: frag.args,
+    isRawField: true
   ))
 
 proc whereFragment*[T](q: Query[T], frag: SqlFragment): Query[T] =
@@ -407,6 +477,32 @@ template toSubqueryFragment*[T](sq: SubQuery[T]): SqlFragment =
   fragment("(" & bq.sql & ")", bq.args)
 
 # --- Subquery WHERE helpers ---
+
+proc whereIn*[T](q: Query[T], field: string, values: openArray[string]): Query[T] =
+  ## `WHERE field IN ($1, $2, …)` с параметризирани стойности.
+  ## Празен списък → винаги false (`1 = 0`).
+  if values.len == 0:
+    return whereDynamic(q, fragment("1 = 0"))
+  var placeholders: seq[string] = @[]
+  var args: seq[string] = @[]
+  for i, v in values:
+    placeholders.add("$" & $(i + 1))
+    args.add(v)
+  let qf = if field.contains(".") or field.contains("("): field else: quoteIdentifier(field)
+  whereDynamic(q, SqlFragment(sql: qf & " IN (" & placeholders.join(", ") & ")", args: args))
+
+proc whereNotIn*[T](q: Query[T], field: string, values: openArray[string]): Query[T] =
+  ## `WHERE field NOT IN ($1, $2, …)`.
+  ## Празен списък → винаги true (`1 = 1`).
+  if values.len == 0:
+    return whereDynamic(q, fragment("1 = 1"))
+  var placeholders: seq[string] = @[]
+  var args: seq[string] = @[]
+  for i, v in values:
+    placeholders.add("$" & $(i + 1))
+    args.add(v)
+  let qf = if field.contains(".") or field.contains("("): field else: quoteIdentifier(field)
+  whereDynamic(q, SqlFragment(sql: qf & " NOT IN (" & placeholders.join(", ") & ")", args: args))
 
 proc whereIn*[T](q: Query[T], field: string, sq: SubQuery[auto]): Query[T] =
   ## WHERE field IN (subquery).
@@ -535,14 +631,62 @@ proc orderByTsRankCd*[T](q: Query[T], field: string, tsq: SqlFragment,
 # --- SQL Генерация с parameter binding ---
 
 var queryTenantPrefix {.threadvar.}: string
+var queryTenantId {.threadvar.}: string
 
 proc setQueryTenant*(tenant: string) =
-  ## Задава текущия tenant prefix за multi-tenant заявки.
+  ## Задава текущия tenant *schema* prefix (PostgreSQL schema isolation).
   queryTenantPrefix = tenant
 
 proc clearQueryTenant*() =
-  ## Изчиства текущия tenant prefix.
+  ## Изчиства текущия tenant schema prefix.
   queryTenantPrefix = ""
+
+proc getQueryTenant*(): string =
+  ## Текущ schema prefix (ако е зададен runtime).
+  queryTenantPrefix
+
+proc setQueryTenantId*(id: string) =
+  ## Задава текущия row-level tenant id (филтрира `tenant_id` колона).
+  queryTenantId = id
+
+proc clearQueryTenantId*() =
+  ## Изчиства row-level tenant id.
+  queryTenantId = ""
+
+proc getQueryTenantId*(): string =
+  ## Текущ row-level tenant id.
+  queryTenantId
+
+proc shiftPlaceholders*(sql: string, offset: int): string =
+  ## Премества `$N` placeholders с `offset` (напр. $1 → $(1+offset)).
+  ## Работи от най-големия N надолу, за да избегне double-replace.
+  if offset == 0:
+    return sql
+  var maxN = 0
+  var i = 0
+  while i < sql.len:
+    if sql[i] == '$' and i + 1 < sql.len and sql[i + 1] in {'0'..'9'}:
+      var j = i + 1
+      var n = 0
+      while j < sql.len and sql[j] in {'0'..'9'}:
+        n = n * 10 + (sql[j].ord - '0'.ord)
+        inc j
+      if n > maxN: maxN = n
+      i = j
+    else:
+      inc i
+  result = sql
+  for n in countdown(maxN, 1):
+    result = result.replace("$" & $n, "$" & $(n + offset))
+
+proc qualifiedTableName*(meta: SchemaMeta): string =
+  ## Връща `"schema"."table"` или `"table"` според runtime/static tenant prefix.
+  let prefix = if queryTenantPrefix.len > 0: queryTenantPrefix
+               else: meta.schemaPrefix
+  if prefix.len > 0:
+    quoteIdentifier(prefix) & "." & quoteIdentifier(meta.tableName)
+  else:
+    quoteIdentifier(meta.tableName)
 
 template toBoundQuery*[T](q: Query[T]): BoundQuery =
   ## Превръща Query в SQL с `$N` placeholders + seq от стойности.
@@ -557,9 +701,7 @@ template toBoundQuery*[T](q: Query[T]): BoundQuery =
   if q.ctes.len > 0:
     var cteParts: seq[string] = @[]
     for cte in q.ctes:
-      var cteSql = cte.query.sql
-      for i in countdown(30, 1):
-        cteSql = cteSql.replace($"$" & $i, $"$" & $(idx + i - 1))
+      let cteSql = shiftPlaceholders(cte.query.sql, idx - 1)
       cteParts.add(cte.name & " AS (" & cteSql & ")")
       for arg in cte.query.args:
         args.add(arg)
@@ -597,19 +739,19 @@ template toBoundQuery*[T](q: Query[T]): BoundQuery =
     parts.add("*")
 
   parts.add("FROM")
-  let prefix = if queryTenantPrefix.len > 0: queryTenantPrefix
-               else: meta.schemaPrefix
-  if prefix.len > 0:
-    parts.add(quoteIdentifier(prefix) & "." & quoteIdentifier(meta.tableName))
-  else:
-    parts.add(quoteIdentifier(meta.tableName))
+  parts.add(qualifiedTableName(meta))
 
   # Joins
   if q.joinClauses.len > 0:
     for j in q.joinClauses:
       parts.add(j.joinType & " JOIN " & j.table & " ON " & j.on)
 
-  var hasWhere = q.whereClauses.len > 0 or (meta.softDeletes and not q.includeDeletedVal)
+  let applyTenantFilter = meta.tenantIdColumn.len > 0 and
+                          queryTenantId.len > 0 and
+                          not q.skipTenantVal
+  var hasWhere = q.whereClauses.len > 0 or
+                 (meta.softDeletes and not q.includeDeletedVal) or
+                 applyTenantFilter
   if hasWhere:
     parts.add("WHERE")
     var wheres: seq[string] = @[]
@@ -618,6 +760,15 @@ template toBoundQuery*[T](q: Query[T]): BoundQuery =
     # Soft delete filter
     if meta.softDeletes and not q.includeDeletedVal:
       wheres.add("\"deleted_at\" IS NULL")
+      isFirst = false
+
+    # Row-level multi-tenant filter
+    if applyTenantFilter:
+      if not isFirst:
+        wheres.add("AND")
+      wheres.add(quoteIdentifier(meta.tenantIdColumn) & " = $" & $idx)
+      args.add(queryTenantId)
+      inc idx
       isFirst = false
 
     for w in q.whereClauses:
@@ -783,6 +934,24 @@ template toBoundQuery*[T](q: Query[T]): BoundQuery =
     parts.add("OFFSET $" & $idx)
     args.add($q.offsetVal.get)
     inc idx
+
+  # Row locks (FOR UPDATE / FOR SHARE / …)
+  case q.lockMode
+  of lmNone:
+    discard
+  of lmForUpdate:
+    parts.add("FOR UPDATE")
+  of lmForShare:
+    parts.add("FOR SHARE")
+  of lmForNoKeyUpdate:
+    parts.add("FOR NO KEY UPDATE")
+  of lmForKeyShare:
+    parts.add("FOR KEY SHARE")
+  if q.lockMode != lmNone:
+    if q.lockNoWait:
+      parts.add("NOWAIT")
+    elif q.lockSkipLocked:
+      parts.add("SKIP LOCKED")
 
   BoundQuery(sql: parts.join(" "), args: args)
 

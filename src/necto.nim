@@ -3,9 +3,9 @@
 ## Основен entry point. Импортира всички публични модули.
 ## Adapter-ите се импортират conditional — всеки изисква съответната native библиотека при линкване.
 
-import necto/[repo, schema, query, changeset, type_system, associations, errors, migration, migrator, schema_generator, schema_verifier, query_verifier, multi]
+import necto/[repo, schema, query, changeset, type_system, associations, errors, migration, migrator, schema_generator, schema_verifier, query_verifier, multi, auth, web]
 import necto/adapters/postgres
-export repo, schema, query, changeset, type_system, associations, errors, migration, migrator, schema_generator, schema_verifier, query_verifier, multi
+export repo, schema, query, changeset, type_system, associations, errors, migration, migrator, schema_generator, schema_verifier, query_verifier, multi, auth, web
 export postgres
 
 when defined(nectoMariadb) or defined(nectoFull):
