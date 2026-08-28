@@ -15,6 +15,13 @@ necto_schema User:
   field age: int
   timestamps
 
+necto_schema OptUser:
+  table "test_opt_users"
+  field id: int64 {.primary_key, auto_increment.}
+  field name: string {.not_null.}
+  field nickname: Option[string]
+  field score: Option[int]
+
 suite "Integration: Schema + Query + Changeset + CRUD":
   setup:
     testrepoInstance.exec("DROP TABLE IF EXISTS \"test_users_int\"")
@@ -289,3 +296,69 @@ suite "Integration: Schema + Query + Changeset + CRUD":
 
     let all = User |> fromSchema |> testrepoInstance.all
     check(all.len >= 3)
+
+  test "validateRequired on update uses existing data":
+    var cs = newChangeset(newUser(), {"name": "KeepName", "email": "keep@test.com", "age": "33"}.toTable)
+    cs = cs.castFields(@["name", "email", "age"])
+    let user = testrepoInstance.insert(cs)
+
+    var updateCs = newChangeset(user, {"age": "34"}.toTable)
+    updateCs = updateCs.castFields(@["age"])
+    updateCs = updateCs.validateRequired(@["name", "age"])
+    check(updateCs.isValid)
+    let updated = testrepoInstance.update(updateCs)
+    check(updated.age == 34)
+    check(updated.name == "KeepName")
+
+  test "delete uses primary key from loaded data":
+    var cs = newChangeset(newUser(), {"name": "ToDelete"}.toTable)
+    cs = cs.castFields(@["name"])
+    let user = testrepoInstance.insert(cs)
+    check(user.id > 0)
+
+    var delCs = newChangeset(user)
+    discard testrepoInstance.delete(delCs)
+    let gone = testrepoInstance.one(fromSchema(User).where("name", Eq, "ToDelete"))
+    check(gone.isNone)
+
+  test "insert_all pads missing fields with DEFAULT":
+    var cs1 = newChangeset(newUser(), {"name": "Full", "email": "full@test.com", "age": "10"}.toTable)
+    cs1 = cs1.castFields(@["name", "email", "age"])
+    var cs2 = newChangeset(newUser(), {"name": "Partial", "age": "11"}.toTable)
+    cs2 = cs2.castFields(@["name", "age"])
+    let users = testrepoInstance.insert_all(@[cs1, cs2])
+    check(users.len == 2)
+    check(users[0].name == "Full")
+    check(users[0].email == "full@test.com")
+    check(users[1].name == "Partial")
+
+  test "optional fields bind SQL NULL and load as none":
+    testrepoInstance.exec("DROP TABLE IF EXISTS \"test_opt_users\"")
+    testrepoInstance.exec("""
+      CREATE TABLE "test_opt_users" (
+        id BIGSERIAL PRIMARY KEY,
+        name TEXT NOT NULL,
+        nickname TEXT,
+        score INTEGER
+      )
+    """)
+    var cs = newChangeset(newOptUser(), {"name": "NoNick", "nickname": "", "score": ""}.toTable)
+    cs = cs.castFields(@["name", "nickname", "score"])
+    let u = testrepoInstance.insert(cs)
+    check(u.name == "NoNick")
+    check(u.nickname.isNone)
+    check(u.score.isNone)
+    let raw = testrepoInstance.queryRaw(
+      "SELECT nickname IS NULL, score IS NULL FROM \"test_opt_users\" WHERE id = $1", @[$u.id])
+    check(raw.len == 1)
+    check(raw[0][0] == "t")
+    check(raw[0][1] == "t")
+
+    var cs2 = newChangeset(newOptUser(), {"name": "HasNick", "nickname": "neo", "score": "7"}.toTable)
+    cs2 = cs2.castFields(@["name", "nickname", "score"])
+    let u2 = testrepoInstance.insert(cs2)
+    check(u2.nickname.isSome)
+    check(u2.nickname.get == "neo")
+    check(u2.score.isSome)
+    check(u2.score.get == 7)
+    testrepoInstance.exec("DROP TABLE IF EXISTS \"test_opt_users\"")

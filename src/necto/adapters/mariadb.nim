@@ -17,6 +17,7 @@ type
 
   MariaDbAdapter* = ref object of Adapter
     poolLock: Lock
+    poolCond: Cond
     pool: Deque[my.DbConn]
     maxConns: int
     activeConns: int
@@ -28,6 +29,7 @@ type
     metricsPoolExhaustedCount: int64
     # Slow query
     slowQuery*: SlowQueryTracker
+    checkoutTimeoutMs*: int  ## 0 = fail immediately when pool is full; >0 wait up to N ms
 
 # --- Конструктор и Connection Pool ---
 
@@ -49,7 +51,8 @@ proc newMariaDbAdapter*(host, user, password, database: string;
                         port: int = 3306;
                         poolSize: int = 10;
                         queryTimeoutMs: int = 0;
-                        slowQueryThresholdMs: int = 0): MariaDbAdapter =
+                        slowQueryThresholdMs: int = 0;
+                        checkoutTimeoutMs: int = 5000): MariaDbAdapter =
   result = MariaDbAdapter(
     host: host,
     port: port,
@@ -65,39 +68,62 @@ proc newMariaDbAdapter*(host, user, password, database: string;
     metricsMaxWaitNs: 0,
     metricsPeakActiveConns: 0,
     metricsPoolExhaustedCount: 0,
-    slowQuery: SlowQueryTracker(thresholdMs: slowQueryThresholdMs)
+    slowQuery: SlowQueryTracker(thresholdMs: slowQueryThresholdMs),
+    checkoutTimeoutMs: checkoutTimeoutMs
   )
   initLock(result.poolLock)
+  initCond(result.poolCond)
   result.pool = initDeque[my.DbConn]()
 
-proc checkout*(a: MariaDbAdapter): my.DbConn =
-  let start = getMonoTime()
-  withLock a.poolLock:
-    let waitNs = (getMonoTime() - start).inNanoseconds
-    inc a.metricsTotalRequests
-    a.metricsTotalWaitNs += waitNs
-    if waitNs > a.metricsMaxWaitNs:
-      a.metricsMaxWaitNs = waitNs
+proc recordCheckoutWait(a: MariaDbAdapter, start: MonoTime) =
+  let waitNs = (getMonoTime() - start).inNanoseconds
+  a.metricsTotalWaitNs += waitNs
+  if waitNs > a.metricsMaxWaitNs:
+    a.metricsMaxWaitNs = waitNs
 
-    if a.pool.len > 0:
-      return a.pool.popFirst()
-    if a.activeConns < a.maxConns:
-      inc a.activeConns
-      if a.activeConns > a.metricsPeakActiveConns:
-        a.metricsPeakActiveConns = a.activeConns
-      try:
-        return a.newConnection()
-      except:
-        withLock a.poolLock:
-          dec a.activeConns
-        raise
-    else:
-      inc a.metricsPoolExhaustedCount
-      raise newException(DatabaseError, "MariaDB connection pool exhausted (max: " & $a.maxConns & ")")
+proc checkout*(a: MariaDbAdapter): my.DbConn =
+  ## Не държи pool lock докато отваря TCP връзка.
+  ## Ако пулът е пълен, чака на condvar до `checkoutTimeoutMs` (0 = веднага грешка).
+  let start = getMonoTime()
+  var createNew = false
+  acquire(a.poolLock)
+  inc a.metricsTotalRequests
+  try:
+    while true:
+      if a.pool.len > 0:
+        a.recordCheckoutWait(start)
+        return a.pool.popFirst()
+      if a.activeConns < a.maxConns:
+        inc a.activeConns
+        if a.activeConns > a.metricsPeakActiveConns:
+          a.metricsPeakActiveConns = a.activeConns
+        createNew = true
+        break
+      let elapsedMs = (getMonoTime() - start).inMilliseconds
+      if a.checkoutTimeoutMs <= 0 or elapsedMs >= a.checkoutTimeoutMs:
+        inc a.metricsPoolExhaustedCount
+        a.recordCheckoutWait(start)
+        raise newException(DatabaseError, "MariaDB connection pool exhausted (max: " & $a.maxConns & ")")
+      waitCondTimeout(a.poolCond, a.poolLock, int(a.checkoutTimeoutMs - elapsedMs))
+  finally:
+    release(a.poolLock)
+
+  if createNew:
+    try:
+      result = a.newConnection()
+      withLock a.poolLock:
+        a.recordCheckoutWait(start)
+      return result
+    except:
+      withLock a.poolLock:
+        dec a.activeConns
+        signal(a.poolCond)
+      raise
 
 proc checkin*(a: MariaDbAdapter, conn: my.DbConn) =
   withLock a.poolLock:
     a.pool.addLast(conn)
+    signal(a.poolCond)
 
 method poolMetrics*(a: MariaDbAdapter): PoolMetrics =
   withLock a.poolLock:

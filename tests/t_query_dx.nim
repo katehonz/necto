@@ -108,3 +108,67 @@ suite "Query DX":
     let u = testrepoInstance.first(fromSchema(DxUser).where("name", Eq, "Bob"))
     check(u.isSome)
     check(u.get.name == "Bob")
+
+  test "COUNT(*) is not identifier-quoted":
+    let cq = compileQuery(fromSchema(DxUser).count())
+    check("COUNT(*)" in cq.sql)
+    check("COUNT(\"*\")" notin cq.sql)
+
+  test "GROUP BY comes before ORDER BY":
+    let bq = fromSchema(DxUser).groupBy("active").orderBy("age", Desc).toBoundQuery()
+    let groupIdx = bq.sql.find("GROUP BY")
+    let orderIdx = bq.sql.find("ORDER BY")
+    check(groupIdx >= 0)
+    check(orderIdx >= 0)
+    check(groupIdx < orderIdx)
+
+  test "count ignores LIMIT and OFFSET":
+    let result = testrepoInstance.count(fromSchema(DxUser).limit(2).offset(1))
+    check(result.hasGroups == false)
+    check(result.total == 5)
+
+  test "update_all with orderBy does not keep ORDER BY":
+    let updated = testrepoInstance.update_all(
+      fromSchema(DxUser).where("name", Eq, "Eve").orderBy("name", Asc).limit(1),
+      {"age": "99"}.toTable
+    )
+    check(updated == 1)
+    let eve = testrepoInstance.one(fromSchema(DxUser).where("name", Eq, "Eve"))
+    check(eve.isSome)
+    check(eve.get.age == 99)
+
+  test "identifier quoting follows SQL dialect":
+    setQueryDialect(pdPostgres)
+    check(quoteIdentifier("age") == "\"age\"")
+    setQueryDialect(pdSqlite)
+    check(quoteIdentifier("age") == "`age`")
+    setQueryDialect(pdMariaDb)
+    check(quoteIdentifier("user") == "`user`")
+    check(quoteIdentifier("a`b") == "`a``b`")
+    setQueryDialect(pdPostgres)
+    let bq = fromSchema(DxUser).where("age", Gte, 18).toBoundQuery()
+    check(bq.sql.contains("\"age\""))
+
+  test "typed int bind encodes as decimal text":
+    let bq = fromSchema(DxUser).where("age", Gte, 18).toBoundQuery()
+    check(bq.args.contains("18"))
+    check(bq.sql.contains("$1"))
+
+  test "typed bool bind encodes for postgres":
+    setQueryDialect(pdPostgres)
+    let bq = fromSchema(DxUser).where("active", Eq, false).toBoundQuery()
+    check(bq.args.contains("false"))
+    setQueryDialect(pdSqlite)
+    let bqLite = fromSchema(DxUser).where("active", Eq, false).toBoundQuery()
+    check(bqLite.args.contains("0"))
+    setQueryDialect(pdPostgres)
+
+  test "NULL bind becomes IS NULL":
+    let bq = fromSchema(DxUser).where("name", Eq, dbNullValue()).toBoundQuery()
+    check(bq.sql.contains("IS NULL"))
+    check(bq.sql.find("$1") < 0)
+
+  test "literal field names are compile-time checked":
+    # Would fail to compile if "age" were not a DxUser field.
+    let rows = testrepoInstance.all(fromSchema(DxUser).where("age", Gte, 18).orderBy("name"))
+    check(rows.len == 4)

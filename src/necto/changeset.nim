@@ -88,10 +88,20 @@ proc addError*[T](cs: var Changeset[T], field, message: string) =
   cs.valid = false
 
 proc validateRequired*[T](cs: Changeset[T], fields: openArray[string]): Changeset[T] =
+  ## Изисква полето да е попълнено в `changes`, или (при update) вече да
+  ## има непразна стойност върху `data` — както Ecto `validate_required`.
+  mixin getFieldValRuntime
   result = cs
   for field in fields:
-    if not result.changes.hasKey(field) or result.changes[field].strip().len == 0:
-      result.addError(field, "can't be blank")
+    if result.changes.hasKey(field):
+      if result.changes[field].strip().len == 0:
+        result.addError(field, "can't be blank")
+    else:
+      var existing = ""
+      when compiles(getFieldValRuntime(result.data, field)):
+        existing = getFieldValRuntime(result.data, field)
+      if existing.strip().len == 0:
+        result.addError(field, "can't be blank")
 
 proc validateFormat*[T](cs: Changeset[T], field: string, pattern: Regex): Changeset[T] =
   result = cs

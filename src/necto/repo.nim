@@ -80,17 +80,25 @@ proc inTransaction*(repo: Repo): bool =
   ## Връща true ако сме в транзакция.
   threadLocalConn != nil
 
+proc applyRepoDialect(repo: Repo, a: Adapter) =
+  if a != nil:
+    setQueryDialect(a.dialect)
+  elif repo.adapter != nil:
+    setQueryDialect(repo.adapter.dialect)
+
 proc getWriteConn*(repo: Repo): Connection =
   ## Взема write връзка. Ако сме в транзакция, връща същата връзка.
+  applyRepoDialect(repo, repo.adapter)
   if threadLocalConn != nil:
     return threadLocalConn
   result = repo.adapter.connect()
 
 proc getReadConn*(repo: Repo): Connection =
   ## Взема read връзка. Ако сме в транзакция, връща същата връзка (write).
+  let a = if repo.readAdapter != nil: repo.readAdapter else: repo.adapter
+  applyRepoDialect(repo, a)
   if threadLocalConn != nil:
     return threadLocalConn
-  let a = if repo.readAdapter != nil: repo.readAdapter else: repo.adapter
   result = a.connect()
 
 proc releaseConn*(repo: Repo, conn: Connection; adapter: Adapter = nil) =
@@ -233,16 +241,18 @@ template count*[T](repo: Repo, q: Query[T]): CountResult =
   ## Връща брой редове.
   ## Ако заявката има GROUP BY, връща CountResult с `hasGroups = true` и `groups`.
   ## Иначе връща CountResult с `hasGroups = false` и `total`.
+  ## ORDER BY / LIMIT / OFFSET / row locks се игнорират — броят е върху целия филтър.
   block:
     let conn = repo.getReadConn()
     let a = if repo.readAdapter != nil: repo.readAdapter else: repo.adapter
     try:
+      var qCount = q.withoutResultDecorations()
       if q.groupByFields.len > 0:
         # Групиран count — връщаме seq[(string, int64)]
-        var bq = q.toBoundQuery()
+        var bq = qCount.toBoundQuery()
         var selectParts: seq[string] = @[]
         for f in q.groupByFields:
-          selectParts.add(quoteIdentifier(f))
+          selectParts.add(quoteSqlExpr(f))
         selectParts.add("COUNT(*)")
         let fromIdx = bq.sql.find(" FROM ")
         let countSql = "SELECT " & selectParts.join(", ") & bq.sql[fromIdx..^1]
@@ -254,8 +264,11 @@ template count*[T](repo: Repo, q: Query[T]): CountResult =
           res.add((groupVal, countVal))
         CountResult(hasGroups: true, groups: res)
       else:
-        var bq = q.toBoundQuery()
-        # Заменяме SELECT ... с SELECT COUNT(*)
+        qCount.aggregates = @[]
+        qCount.selectFields = @[]
+        qCount.havingClauses = @[]
+        qCount.distinctVal = false
+        var bq = qCount.toBoundQuery()
         let fromIdx = bq.sql.find(" FROM ")
         let countSql = "SELECT COUNT(*)" & bq.sql[fromIdx..^1]
         let val = a.scalar(conn, countSql, bq.args)
@@ -283,6 +296,8 @@ type
     finished: bool
     currentOffset: int
     useCursor: bool
+    ownsConn: bool      ## True ако stream-ът checkout-на връзката сам
+    startedTx: bool     ## True ако stream-ът започна собствена транзакция
 
 proc next*[T](it: var StreamIterator[T]): Option[T] =
   ## Връща следващия запис от stream-а или none ако stream-ът е изчерпан.
@@ -321,11 +336,13 @@ template stream*[T](repo: Repo, q: Query[T], batchSz: int = 100): StreamIterator
   ## Създава cursor-based stream за Query.
   ## Stream-ът задържа една връзка и една транзакция.
   ## За MariaDB се емулира чрез LIMIT/OFFSET вместо server-side курсор.
+  ## Ако вече сме в транзакция, курсорът ползва нея — без вложен BEGIN/COMMIT.
   ## Задължително извикайте `close()` или използвайте `forStream` template.
   mixin schemaMeta, load
   block:
     let meta = schemaMeta(T)
     let a = if repo.readAdapter != nil: repo.readAdapter else: repo.adapter
+    let inTx = repo.inTransaction()
     let conn = repo.getReadConn()
     let bs = batchSz
     var iter: StreamIterator[T]
@@ -336,33 +353,45 @@ template stream*[T](repo: Repo, q: Query[T], batchSz: int = 100): StreamIterator
     iter.finished = false
     iter.currentOffset = 0
     iter.useCursor = a.supportsCursor()
+    iter.ownsConn = not inTx
+    iter.startedTx = false
     iter.bq = q.toBoundQuery()
     let uniqueId = epochTime().int64
     iter.cursorName = "necto_cursor_" & meta.tableName & "_" & $uniqueId
 
     try:
-      a.beginTransaction(conn)
+      if not inTx:
+        a.beginTransaction(conn)
+        iter.startedTx = true
       if iter.useCursor:
         let cursorSql = "DECLARE " & quoteIdentifier(iter.cursorName) & " CURSOR FOR " & iter.bq.sql
         a.exec(conn, cursorSql, iter.bq.args)
     except:
-      repo.releaseConn(conn, a)
+      if iter.startedTx:
+        try:
+          a.rollbackTransaction(conn)
+        except:
+          discard
+      if iter.ownsConn:
+        repo.releaseConn(conn, a)
       raise
 
     iter
 
 proc close*[T](it: var StreamIterator[T]) =
   ## Затваря курсора и освобождава връзката.
-  ## За MariaDB (LIMIT/OFFSET emulation) просто commit-ва транзакцията.
+  ## Ако stream-ът е в съществуваща транзакция, не я commit-ва и не disconnect-ва.
   if it.conn == nil:
     return
   try:
     if it.useCursor:
       it.adapter.exec(it.conn, "CLOSE " & quoteIdentifier(it.cursorName))
-    it.adapter.commitTransaction(it.conn)
+    if it.startedTx:
+      it.adapter.commitTransaction(it.conn)
   except:
     discard
-  it.adapter.disconnect(it.conn)
+  if it.ownsConn:
+    it.adapter.disconnect(it.conn)
   it.conn = nil
 
 template forStream*[T](repo: Repo, q: Query[T], varName: untyped, body: untyped) =
@@ -629,51 +658,60 @@ template buildUpdateSql(cs: auto, meta: SchemaMeta): (string, seq[string]) =
                 sets.join(", ") & " WHERE " & whereParts.join(" AND ")
       (sql, values)
 
-proc buildDeleteSql(cs: auto, meta: SchemaMeta): (string, seq[string]) =
+template pkFromChangeset(cs: auto, meta: SchemaMeta): string =
+  ## PK от changes, или от вече заредения запис.
+  mixin getFieldValRuntime
+  block:
+    var pkVal = ""
+    for f in meta.fields:
+      if f.primaryKey:
+        if cs.changes.hasKey(f.name):
+          pkVal = cs.changes[f.name]
+        if pkVal.len == 0:
+          try:
+            pkVal = getFieldValRuntime(cs.data, f.name)
+          except:
+            discard
+        break
+    pkVal
+
+template buildDeleteSql(cs: auto, meta: SchemaMeta): (string, seq[string]) =
   ## Генерира DELETE SQL от changeset и schema metadata.
-  var pkVal: string = ""
-  for f in meta.fields:
-    if f.primaryKey:
-      if cs.changes.hasKey(f.name):
-        pkVal = cs.changes[f.name]
-      break
+  mixin getFieldValRuntime
+  block:
+    let pkVal = pkFromChangeset(cs, meta)
+    if pkVal.len == 0:
+      raise newException(ValidationError, "Cannot delete without primary key value")
 
-  if pkVal.len == 0:
-    raise newException(ValidationError, "Cannot delete without primary key value")
+    var args = @[pkVal]
+    var whereParts = @[quoteIdentifier(meta.primaryKeyField) & " = $1"]
+    let tid = getQueryTenantId()
+    if meta.tenantIdColumn.len > 0 and tid.len > 0:
+      whereParts.add(quoteIdentifier(meta.tenantIdColumn) & " = $2")
+      args.add(tid)
+    let sql = "DELETE FROM " & qualifiedTableName(meta) & " WHERE " & whereParts.join(" AND ")
+    (sql, args)
 
-  var args = @[pkVal]
-  var whereParts = @[quoteIdentifier(meta.primaryKeyField) & " = $1"]
-  let tid = getQueryTenantId()
-  if meta.tenantIdColumn.len > 0 and tid.len > 0:
-    whereParts.add(quoteIdentifier(meta.tenantIdColumn) & " = $2")
-    args.add(tid)
-  let sql = "DELETE FROM " & qualifiedTableName(meta) & " WHERE " & whereParts.join(" AND ")
-  result = (sql, args)
-
-proc buildSoftDeleteSql(cs: auto, meta: SchemaMeta): (string, seq[string]) =
+template buildSoftDeleteSql(cs: auto, meta: SchemaMeta): (string, seq[string]) =
   ## Генерира UPDATE SQL за soft delete.
-  var pkVal: string = ""
-  for f in meta.fields:
-    if f.primaryKey:
-      if cs.changes.hasKey(f.name):
-        pkVal = cs.changes[f.name]
-      break
+  mixin getFieldValRuntime
+  block:
+    let pkVal = pkFromChangeset(cs, meta)
+    if pkVal.len == 0:
+      raise newException(ValidationError, "Cannot soft-delete without primary key value")
 
-  if pkVal.len == 0:
-    raise newException(ValidationError, "Cannot soft-delete without primary key value")
-
-  var args = @[pkVal]
-  var whereParts = @[
-    quoteIdentifier(meta.primaryKeyField) & " = $1",
-    quoteIdentifier("deleted_at") & " IS NULL"
-  ]
-  let tid = getQueryTenantId()
-  if meta.tenantIdColumn.len > 0 and tid.len > 0:
-    whereParts.add(quoteIdentifier(meta.tenantIdColumn) & " = $2")
-    args.add(tid)
-  let sql = "UPDATE " & qualifiedTableName(meta) & " SET " & quoteIdentifier("deleted_at") &
-            " = NOW() WHERE " & whereParts.join(" AND ")
-  result = (sql, args)
+    var args = @[pkVal]
+    var whereParts = @[
+      quoteIdentifier(meta.primaryKeyField) & " = $1",
+      quoteIdentifier("deleted_at") & " IS NULL"
+    ]
+    let tid = getQueryTenantId()
+    if meta.tenantIdColumn.len > 0 and tid.len > 0:
+      whereParts.add(quoteIdentifier(meta.tenantIdColumn) & " = $2")
+      args.add(tid)
+    let sql = "UPDATE " & qualifiedTableName(meta) & " SET " & quoteIdentifier("deleted_at") &
+              " = NOW() WHERE " & whereParts.join(" AND ")
+    (sql, args)
 
 # --- Constraint Error Handling (Ecto pattern) ---
 
@@ -722,21 +760,28 @@ template insert*[T](repo: Repo, cs: Changeset[T]): T =
     try:
       let meta = schemaMeta(T)
       let (sql, args) = buildInsertSql(cs, meta)
-      let newId = repo.adapter.insertReturning(conn, sql, meta.primaryKeyField, args)
-      let loadSql = "SELECT * FROM " & qualifiedTableName(meta) &
-                    " WHERE " & quoteIdentifier(meta.primaryKeyField) & " = $1"
-      let rows = repo.adapter.query(conn, loadSql, @[$newId])
-      if rows.len > 0:
-        load(rows[0], T)
+      if repo.adapter.supportsReturning():
+        let rows = repo.adapter.query(conn, sql & " RETURNING *", args)
+        if rows.len > 0:
+          load(rows[0], T)
+        else:
+          cs.data
       else:
-        cs.data
+        let newId = repo.adapter.insertReturning(conn, sql, meta.primaryKeyField, args)
+        let loadSql = "SELECT * FROM " & qualifiedTableName(meta) &
+                      " WHERE " & quoteIdentifier(meta.primaryKeyField) & " = $1"
+        let rows = repo.adapter.query(conn, loadSql, @[$newId])
+        if rows.len > 0:
+          load(rows[0], T)
+        else:
+          cs.data
     except DatabaseError as e:
       var cs2 = cs
       handleConstraintError(cs2, e.msg)
       if cs2.isInvalid():
         var ce = new(ConstraintError)
         ce.msg = e.msg
-        ce.constraintName = ""
+        ce.constraintName = parseConstraintName(e.msg)
         raise ce
       raise
     finally:
@@ -753,59 +798,62 @@ template insert*[T](repo: Repo, cs: Changeset[T], onConflict: OnConflict): T =
     try:
       let meta = schemaMeta(T)
       let (sql, args) = buildInsertSql(cs, meta, onConflict)
-      var pkVal = ""
-      for f in meta.fields:
-        if f.primaryKey:
-          if cs.changes.hasKey(f.name):
-            pkVal = cs.changes[f.name]
-          else:
-            try:
-              pkVal = getFieldValRuntime(cs.data, f.name)
-            except:
-              discard
-          break
-      var hasRealPk = pkVal.len > 0
-      if hasRealPk:
-        # Проверяваме дали PK е валиден (не default стойност като "0")
-        for f in meta.fields:
-          if f.primaryKey and (f.nimType == "int64" or f.nimType == "int" or f.nimType == "int16"):
-            try:
-              if parseBiggestInt(pkVal) <= 0:
-                hasRealPk = false
-            except ValueError:
-              discard
-            break
-      if hasRealPk:
-        # При upsert знаем PK и можем да load-нем директно
-        repo.adapter.exec(conn, sql, args)
-        let loadSql = "SELECT * FROM " & qualifiedTableName(meta) &
-                      " WHERE " & quoteIdentifier(meta.primaryKeyField) & " = $1"
-        let rows = repo.adapter.query(conn, loadSql, @[pkVal])
+      if repo.adapter.supportsReturning():
+        let rows = repo.adapter.query(conn, sql & " RETURNING *", args)
         if rows.len > 0:
           load(rows[0], T)
         else:
           cs.data
       else:
-        # Не знаем PK - използваме insertReturning
-        var newId: int64 = 0
-        try:
-          newId = repo.adapter.insertReturning(conn, sql, meta.primaryKeyField, args)
-        except DatabaseError as e:
-          if onConflict.kind == ocDoNothing and e.msg.contains("no rows returned"):
-            # DO NOTHING — връщаме nil/pointer който извикващият трябва да обработи
-            newId = 0
-          else:
-            raise
-        if newId > 0:
+        var pkVal = ""
+        for f in meta.fields:
+          if f.primaryKey:
+            if cs.changes.hasKey(f.name):
+              pkVal = cs.changes[f.name]
+            else:
+              try:
+                pkVal = getFieldValRuntime(cs.data, f.name)
+              except:
+                discard
+            break
+        var hasRealPk = pkVal.len > 0
+        if hasRealPk:
+          for f in meta.fields:
+            if f.primaryKey and (f.nimType == "int64" or f.nimType == "int" or f.nimType == "int16"):
+              try:
+                if parseBiggestInt(pkVal) <= 0:
+                  hasRealPk = false
+              except ValueError:
+                discard
+              break
+        if hasRealPk:
+          repo.adapter.exec(conn, sql, args)
           let loadSql = "SELECT * FROM " & qualifiedTableName(meta) &
                         " WHERE " & quoteIdentifier(meta.primaryKeyField) & " = $1"
-          let rows = repo.adapter.query(conn, loadSql, @[$newId])
+          let rows = repo.adapter.query(conn, loadSql, @[pkVal])
           if rows.len > 0:
             load(rows[0], T)
           else:
             cs.data
         else:
-          cs.data
+          var newId: int64 = 0
+          try:
+            newId = repo.adapter.insertReturning(conn, sql, meta.primaryKeyField, args)
+          except DatabaseError as e:
+            if onConflict.kind == ocDoNothing and e.msg.contains("no rows returned"):
+              newId = 0
+            else:
+              raise
+          if newId > 0:
+            let loadSql = "SELECT * FROM " & qualifiedTableName(meta) &
+                          " WHERE " & quoteIdentifier(meta.primaryKeyField) & " = $1"
+            let rows = repo.adapter.query(conn, loadSql, @[$newId])
+            if rows.len > 0:
+              load(rows[0], T)
+            else:
+              cs.data
+          else:
+            cs.data
     except DatabaseError as e:
       var cs2 = cs
       handleConstraintError(cs2, e.msg)
@@ -889,6 +937,9 @@ template insert_all*(repo: Repo, changesets: auto): auto =
               rowPlaceholders.add("$" & $idx)
               allValues.add(cs.changes[key])
               inc idx
+            else:
+              # Missing field on this row — let the database default apply
+              rowPlaceholders.add("DEFAULT")
           for f in timestampCols:
             rowPlaceholders.add("$" & $idx)
             allValues.add(dumpValue(now()))
@@ -1038,13 +1089,12 @@ template update_all*[T](repo: Repo, q: Query[T], changes: Table[string, string])
           inc idx
           break
 
-      let bq = q.toBoundQuery()
-      # Заменяме SELECT ... с UPDATE ... SET ... WHERE ...
-      let whereIdx = bq.sql.find(" WHERE ")
+      let bq = q.forMutation().toBoundQuery()
+      # Заменяме SELECT ... с UPDATE ... SET ... WHERE ... (без ORDER/LIMIT/lock)
+      let whereSql = extractWhereSql(bq.sql)
       var sql = "UPDATE " & qualifiedTableName(meta) & " SET " & sets.join(", ")
-      if whereIdx >= 0:
-        let whereSql = renumberPlaceholders(bq.sql[whereIdx..^1], idx - 1)
-        sql.add(" " & whereSql)
+      if whereSql.len > 0:
+        sql.add(" " & renumberPlaceholders(whereSql, idx - 1))
         for a in bq.args:
           values.add(a)
       
@@ -1061,12 +1111,12 @@ template delete_all*[T](repo: Repo, q: Query[T]): int64 =
     let conn = repo.getWriteConn()
     try:
       let meta = schemaMeta(T)
-      let bq = q.toBoundQuery()
-      let whereIdx = bq.sql.find(" WHERE ")
+      let bq = q.forMutation().toBoundQuery()
+      let whereSql = extractWhereSql(bq.sql)
       var sql = "DELETE FROM " & qualifiedTableName(meta)
       var args: seq[string] = @[]
-      if whereIdx >= 0:
-        sql.add(" " & bq.sql[whereIdx..^1])
+      if whereSql.len > 0:
+        sql.add(" " & whereSql)
         args = bq.args
       
       repo.adapter.execAffected(conn, sql, args)
@@ -1103,6 +1153,12 @@ template update*[T](repo: Repo, cs: Changeset[T]): T =
             load(rows[0], T)
           else:
             cs.data
+        else:
+          cs.data
+      elif repo.adapter.supportsReturning():
+        let rows = repo.adapter.query(conn, sql & " RETURNING *", args)
+        if rows.len > 0:
+          load(rows[0], T)
         else:
           cs.data
       else:
@@ -1143,7 +1199,7 @@ template update*[T](repo: Repo, cs: Changeset[T]): T =
 template delete*[T](repo: Repo, cs: Changeset[T]): T =
   ## Изтрива запис от changeset.
   ## Ако schema-та има soft_deletes, прави soft delete (UPDATE deleted_at).
-  mixin schemaMeta
+  mixin schemaMeta, getFieldValRuntime
   block:
     let conn = repo.getWriteConn()
     try:
@@ -1160,7 +1216,7 @@ template delete*[T](repo: Repo, cs: Changeset[T]): T =
 
 template hardDelete*[T](repo: Repo, cs: Changeset[T]): T =
   ## Винаги прави истински DELETE, независимо от soft_deletes.
-  mixin schemaMeta
+  mixin schemaMeta, getFieldValRuntime
   block:
     let conn = repo.getWriteConn()
     try:
@@ -1196,6 +1252,7 @@ proc transaction*(repo: Repo, body: proc()) =
   ## Всички repo операции вътре в body ползват една и съща връзка.
   ## Ако threadLocalConn е вече зададена (напр. от advisory lock),
   ## използваме я вместо да създаваме нова връзка.
+  applyRepoDialect(repo, repo.adapter)
   let existingConn = threadLocalConn
   let conn = if existingConn != nil: existingConn else: repo.adapter.connect()
   let prevConn = threadLocalConn

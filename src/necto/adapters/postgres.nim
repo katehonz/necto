@@ -9,6 +9,8 @@ import std/[locks, deques, strutils, monotimes, times, tables]
 import db_connector/db_postgres as pg
 import db_connector/postgres as libpq
 import ./base
+import ./common
+import ../type_system
 
 export base
 
@@ -21,6 +23,7 @@ type
   PostgresAdapter* = ref object of Adapter
     ## PostgreSQL адаптер с вграден connection pool.
     poolLock: Lock
+    poolCond: Cond
     pool: Deque[pg.DbConn]
     maxConns: int
     activeConns: int
@@ -42,6 +45,7 @@ type
     # Query timeout
     queryTimeoutMs*: int  # 0 = disabled
     slowQueryThresholdMs*: int  # 0 = disabled
+    checkoutTimeoutMs*: int  ## 0 = fail immediately when pool is full; >0 wait up to N ms
     metricsSlowQueryCount: int64
 
 # --- Конструктор и Connection Pool ---
@@ -69,7 +73,8 @@ proc newPostgresAdapter*(host, user, password, database: string;
                          port: int = 5432;
                          poolSize: int = 10;
                          queryTimeoutMs: int = 0;
-                         slowQueryThresholdMs: int = 0): PostgresAdapter =
+                         slowQueryThresholdMs: int = 0;
+                         checkoutTimeoutMs: int = 5000): PostgresAdapter =
   ## Създава PostgreSQL адаптер с connection pool.
   result = PostgresAdapter(
     host: host,
@@ -93,42 +98,65 @@ proc newPostgresAdapter*(host, user, password, database: string;
     metricsPrepStmtMisses: 0,
     queryTimeoutMs: queryTimeoutMs,
     slowQueryThresholdMs: slowQueryThresholdMs,
+    checkoutTimeoutMs: checkoutTimeoutMs,
     metricsSlowQueryCount: 0
   )
   initLock(result.poolLock)
+  initCond(result.poolCond)
   initLock(result.prepLock)
   result.pool = initDeque[pg.DbConn]()
 
+proc recordCheckoutWait(a: PostgresAdapter, start: MonoTime) =
+  let waitNs = (getMonoTime() - start).inNanoseconds
+  a.metricsTotalWaitNs += waitNs
+  if waitNs > a.metricsMaxWaitNs:
+    a.metricsMaxWaitNs = waitNs
+
 proc checkout*(a: PostgresAdapter): pg.DbConn =
   ## Взема връзка от пула или създава нова.
+  ## Не държи pool lock докато отваря TCP връзка.
+  ## Ако пулът е пълен, чака на condvar до `checkoutTimeoutMs` (0 = веднага грешка).
   let start = getMonoTime()
-  withLock a.poolLock:
-    let waitNs = (getMonoTime() - start).inNanoseconds
-    inc a.metricsTotalRequests
-    a.metricsTotalWaitNs += waitNs
-    if waitNs > a.metricsMaxWaitNs:
-      a.metricsMaxWaitNs = waitNs
+  var createNew = false
+  acquire(a.poolLock)
+  inc a.metricsTotalRequests
+  try:
+    while true:
+      if a.pool.len > 0:
+        a.recordCheckoutWait(start)
+        return a.pool.popFirst()
+      if a.activeConns < a.maxConns:
+        inc a.activeConns
+        if a.activeConns > a.metricsPeakActiveConns:
+          a.metricsPeakActiveConns = a.activeConns
+        createNew = true
+        break
+      let elapsedMs = (getMonoTime() - start).inMilliseconds
+      if a.checkoutTimeoutMs <= 0 or elapsedMs >= a.checkoutTimeoutMs:
+        inc a.metricsPoolExhaustedCount
+        a.recordCheckoutWait(start)
+        raise newException(DbError, "PostgreSQL connection pool exhausted (max: " & $a.maxConns & ")")
+      waitCondTimeout(a.poolCond, a.poolLock, int(a.checkoutTimeoutMs - elapsedMs))
+  finally:
+    release(a.poolLock)
 
-    if a.pool.len > 0:
-      return a.pool.popFirst()
-    if a.activeConns < a.maxConns:
-      inc a.activeConns
-      if a.activeConns > a.metricsPeakActiveConns:
-        a.metricsPeakActiveConns = a.activeConns
-      try:
-        return a.newConnection()
-      except:
-        withLock a.poolLock:
-          dec a.activeConns
-        raise
-    else:
-      inc a.metricsPoolExhaustedCount
-      raise newException(DbError, "PostgreSQL connection pool exhausted (max: " & $a.maxConns & ")")
+  if createNew:
+    try:
+      result = a.newConnection()
+      withLock a.poolLock:
+        a.recordCheckoutWait(start)
+      return result
+    except:
+      withLock a.poolLock:
+        dec a.activeConns
+        signal(a.poolCond)
+      raise
 
 proc checkin*(a: PostgresAdapter, conn: pg.DbConn) =
-  ## Връща връзка обратно в пула.
+  ## Връща връзка обратно в пула и събужда чакащи checkout-и.
   withLock a.poolLock:
     a.pool.addLast(conn)
+    signal(a.poolCond)
 
 method poolMetrics*(a: PostgresAdapter): PoolMetrics =
   ## Връща текущите метрики за pool-а.
@@ -161,10 +189,26 @@ method prepStmtMetrics*(a: PostgresAdapter): PrepStmtMetrics =
 
 # --- Low-level prepared statement + parameter binding ---
 
+proc toPgParams(args: seq[string]): cstringArray =
+  ## cstringArray с `nil` слотове за SQL NULL (nectoDbNull).
+  result = cast[cstringArray](alloc0((args.len + 1) * sizeof(cstring)))
+  for i, a in args:
+    if not isDbNull(a):
+      let p = cast[cstring](alloc(a.len + 1))
+      copyMem(p, a.cstring, a.len + 1)
+      result[i] = p
+
+proc freePgParams(arr: cstringArray, n: int) =
+  if arr == nil: return
+  for i in 0 ..< n:
+    if arr[i] != nil:
+      dealloc(arr[i])
+  dealloc(arr)
+
 proc pgQuery(a: PostgresAdapter, conn: PgConnection, sql: string, args: seq[string]): libpq.PPGresult =
   ## Изпълнява SQL с per-connection prepared statement cache.
-  var arr = allocCStringArray(args)
-  defer: deallocCStringArray(arr)
+  var arr = toPgParams(args)
+  defer: freePgParams(arr, args.len)
 
   var stmtName: string
   var needPrepare = false
@@ -189,8 +233,9 @@ proc pgQuery(a: PostgresAdapter, conn: PgConnection, sql: string, args: seq[stri
     inc a.metricsPrepStmtMisses
     # Generate unique stmt name per attempt — avoids conflicts
     # when the same PG connection is reused across different PgConnection wrappers.
-    inc a.stmtCounter
-    stmtName = "necto_p" & $a.stmtCounter
+    withLock a.prepLock:
+      inc a.stmtCounter
+      stmtName = "necto_p" & $a.stmtCounter
 
     let prepRes = libpq.pqprepare(conn.dbConn, stmtName.cstring, sql.cstring, int32(args.len), nil)
     let prepStatus = libpq.pqresultStatus(prepRes)
@@ -223,11 +268,14 @@ proc pgSelect(a: PostgresAdapter, conn: PgConnection, sql: string, args: seq[str
   for i in 0 ..< nrows:
     var row: DbRow = @[]
     for j in 0 ..< ncols:
-      let cval = libpq.pqgetvalue(res, i, j)
-      if cval == nil:
-        row.add("")
+      if libpq.pqgetisnull(res, i, j) != 0:
+        row.add(nectoDbNull)
       else:
-        row.add($cval)
+        let cval = libpq.pqgetvalue(res, i, j)
+        if cval == nil:
+          row.add(nectoDbNull)
+        else:
+          row.add($cval)
     result.add(row)
 
 proc pgScalar(a: PostgresAdapter, conn: PgConnection, sql: string, args: seq[string]): string =
@@ -238,9 +286,12 @@ proc pgScalar(a: PostgresAdapter, conn: PgConnection, sql: string, args: seq[str
   if libpq.pqresultStatus(res) != libpq.PGRES_TUPLES_OK:
     raise newException(DatabaseError, $libpq.pqErrorMessage(conn.dbConn))
   if libpq.pqntuples(res) > 0 and libpq.pqnfields(res) > 0:
-    let cval = libpq.pqgetvalue(res, 0, 0)
-    if cval != nil:
-      result = $cval
+    if libpq.pqgetisnull(res, 0, 0) != 0:
+      result = nectoDbNull
+    else:
+      let cval = libpq.pqgetvalue(res, 0, 0)
+      if cval != nil:
+        result = $cval
 
 proc pgAffected(a: PostgresAdapter, conn: PgConnection, sql: string, args: seq[string]): int64 =
   let t0 = getMonoTime()
@@ -313,7 +364,7 @@ method insertReturning*(a: PostgresAdapter, conn: Connection,
                         sql: string, pkName: string,
                         args: seq[string] = @[]): int64 =
   let pgConn = PgConnection(conn)
-  let res = pgQuery(a, pgConn, sql & " RETURNING " & pkName, args)
+  let res = pgQuery(a, pgConn, sql & " RETURNING " & a.quoteIdentifier(pkName), args)
   defer: libpq.pqclear(res)
   if libpq.pqresultStatus(res) != libpq.PGRES_TUPLES_OK:
     raise newException(DatabaseError, $libpq.pqErrorMessage(pgConn.dbConn))
@@ -330,7 +381,7 @@ method fetchCursor*(a: PostgresAdapter, conn: Connection, cursorName: string,
                     count: int): seq[DbRow] =
   ## Fetch-ва до `count` реда от PostgreSQL курсор.
   let pgConn = PgConnection(conn)
-  let sql = "FETCH FORWARD " & $count & " FROM \"" & cursorName & "\""
+  let sql = "FETCH FORWARD " & $count & " FROM " & a.quoteIdentifier(cursorName)
   pgSelect(a, pgConn, sql, @[])
 
 method beginTransaction*(a: PostgresAdapter, conn: Connection) =

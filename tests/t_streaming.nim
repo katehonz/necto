@@ -83,3 +83,24 @@ suite "Streaming":
       forStream(testrepoInstance, fromSchema(StreamUser), user):
         inc count
       check(count == 25)
+
+  test "stream inside a transaction does not commit early":
+    var raised = false
+    try:
+      testrepoInstance.transaction do ():
+        var names: seq[string] = @[]
+        forStream(testrepoInstance, fromSchema(StreamUser).orderBy("id", Asc), user):
+          names.add(user.name)
+        check(names.len == 25)
+        testrepoInstance.exec(
+          "INSERT INTO test_stream_users (name, age) VALUES ($1, $2)",
+          @["TxStream", "99"]
+        )
+        raise newException(ValueError, "rollback stream tx")
+    except ValueError:
+      raised = true
+    check(raised)
+    # If stream.close() had COMMITed the outer transaction, this row would persist.
+    let after = testrepoInstance.scalar(
+      "SELECT COUNT(*) FROM test_stream_users WHERE name = $1", @["TxStream"])
+    check(after == "0")

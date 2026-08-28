@@ -74,7 +74,8 @@ suite "Compiled Query Cache":
 
   test "compileQuery for COUNT aggregate":
     let cq = compileQuery(fromSchema(CqUser).count())
-    check(cq.sql.find("COUNT") >= 0)
+    check("COUNT(*)" in cq.sql)
+    check("COUNT(\"*\")" notin cq.sql)
 
   test "cached query produces same results as direct query":
     # Seed data

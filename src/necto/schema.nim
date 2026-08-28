@@ -20,10 +20,39 @@ import ./adapters/base
 
 export type_system, base, times
 
+var queryDialect {.threadvar.}: SqlDialect
+
+proc setQueryDialect*(d: SqlDialect) =
+  ## Задава SQL диалекта за quoting на идентификатори в текущия thread.
+  queryDialect = d
+
+proc getQueryDialect*(): SqlDialect =
+  queryDialect
+
 proc quoteIdentifier*(ident: string): string =
-  ## PostgreSQL identifier quoting: wraps in double quotes and escapes inner quotes.
-  ## This prevents SQL injection via table/column names.
-  "\"" & ident.replace("\"", "\"\"") & "\""
+  ## Dialect-aware identifier quoting (PostgreSQL `"id"`, MariaDB/SQLite `` `id` ``).
+  case queryDialect
+  of pdMariaDb, pdSqlite:
+    "`" & ident.replace("`", "``") & "`"
+  else:
+    "\"" & ident.replace("\"", "\"\"") & "\""
+
+proc isRawSqlExpr*(ident: string): bool =
+  ## True when `ident` is `*`, a qualified name, a function/operator expression,
+  ## or already quoted — and must not be wrapped in identifier quotes.
+  if ident.len == 0 or ident == "*":
+    return true
+  if ident[0] in {'"', '`', '('}:
+    return true
+  for c in ident:
+    if c in {'.', '(', ')', '#', '@', '?', ' ', '+', '-', '*', '/', ':'}:
+      return true
+  false
+
+proc quoteSqlExpr*(ident: string): string =
+  ## Quote a simple identifier; leave `*`, qualified names and SQL expressions as-is.
+  if isRawSqlExpr(ident): ident
+  else: quoteIdentifier(ident)
 
 # --- Schema Metadata ---
 
@@ -397,10 +426,11 @@ macro necto_schema*(name: untyped, body: untyped): untyped =
           result.`fkId` = loadValue(row[`idx`], int64)
         )
 
-        # Internal pointer field for preloaded association object
+        # Traced ref for preloaded association (RootRef so the target type
+        # need not be declared yet — belongs_to often precedes the parent schema).
         let ptrFieldName = assocName & "Cache"
         let ptrField = newIdentNode(ptrFieldName)
-        fieldDefs.add(newIdentDefs(ptrField, newIdentNode("pointer")))
+        fieldDefs.add(newIdentDefs(ptrField, newIdentNode("RootRef")))
         constructorAssignments.add(
           nnkAsgn.newTree(nnkDotExpr.newTree(newIdentNode("result"), ptrField), newNilLit())
         )
@@ -642,7 +672,7 @@ macro necto_schema*(name: untyped, body: untyped): untyped =
     newTree(nnkRefTy,
       newTree(nnkObjectTy,
         newEmptyNode(),
-        newEmptyNode(),
+        newTree(nnkOfInherit, newIdentNode("RootObj")),
         recList
       )
     )
@@ -724,6 +754,9 @@ macro necto_schema*(name: untyped, body: untyped): untyped =
     let cond = nnkInfix.newTree(newIdentNode("=="), newIdentNode("fieldName"), newLit(fieldNameStr))
     let body = nnkDotExpr.newTree(newIdentNode("obj"), fieldId)
     getFieldWhenBranches.add(newTree(nnkElifBranch, cond, body))
+  getFieldWhenBranches.add(newTree(nnkElse,
+    newTree(nnkStaticStmt, newCall(newIdentNode("error"),
+      newLit("Unknown field for get: " & schemaName & ".")))))
   let getFieldWhenStmt = newTree(nnkWhenStmt, getFieldWhenBranches)
 
   var getFieldTemplate = newTree(nnkTemplateDef,
@@ -880,7 +913,7 @@ macro necto_schema*(name: untyped, body: untyped): untyped =
           childMap = preloadBelongsTo[`typeName`, `childType`](repo, records)
           for p in records:
             if childMap.hasKey(p.`fkFieldNode`):
-              p.`ptrFieldNode` = cast[pointer](childMap[p.`fkFieldNode`])
+              p.`ptrFieldNode` = childMap[p.`fkFieldNode`]
             else:
               p.`ptrFieldNode` = nil
           for p in records:

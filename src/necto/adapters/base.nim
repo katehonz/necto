@@ -114,7 +114,8 @@ method slowQueryCount*(a: Adapter): int64 {.base.} =
 
 method supportsReturning*(a: Adapter): bool {.base.} =
   ## Връща дали адаптерът поддържа native RETURNING клауза.
-  a.dialect == pdPostgres
+  ## PostgreSQL винаги; SQLite от 3.35+; MariaDB ползва LAST_INSERT_ID емулация.
+  a.dialect in {pdPostgres, pdSqlite}
 
 method supportsOnConflict*(a: Adapter): bool {.base.} =
   ## Връща дали адаптерът поддържа ON CONFLICT (upsert).

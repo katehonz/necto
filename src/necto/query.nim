@@ -24,7 +24,7 @@ type
   WhereClause* = object
     field*: string
     op*: WhereOp
-    value*: string
+    value*: DbValue
     conjunction*: string  # "AND" | "OR"
     fragmentArgs*: seq[string]  # args from SqlFragment
     isRawField*: bool  ## Ако true, `field` се използва директно без кавички (SQL израз).
@@ -63,7 +63,7 @@ type
   HavingClause* = object
     field*: string
     op*: WhereOp
-    value*: string
+    value*: DbValue
     conjunction*: string  ## "AND" | "OR"
     fragmentArgs*: seq[string]  ## args from SqlFragment
     isRawField*: bool  ## Ако true, `field` се използва директно без кавички.
@@ -110,46 +110,114 @@ proc fromSchema*[T](typ: typedesc[T]): Query[T] =
 
 # --- Модификатори (immutable клониране) ---
 
+proc fieldIdentName(n: NimNode): string {.compileTime.} =
+  case n.kind
+  of nnkPostfix: fieldIdentName(n[1])
+  of nnkPragmaExpr: fieldIdentName(n[0])
+  of nnkAccQuoted: $n[0]
+  else: $n
+
+proc recListOfSchema(typ: NimNode): NimNode {.compileTime.} =
+  ## typedesc[Foo] / typedesc[ref Foo] / Foo → object rec list
+  var t = typ.getType
+  while t.kind == nnkBracketExpr and t.len >= 2:
+    let head = $t[0]
+    if head in ["typeDesc", "typedesc", "ref", "ptr"]:
+      t = t[^1]
+    else:
+      break
+  if t.kind == nnkSym:
+    var impl = t.getTypeImpl
+    if impl.kind == nnkRefTy:
+      var inner = impl[0]
+      if inner.kind == nnkSym:
+        inner = inner.getTypeImpl
+      if inner.kind == nnkObjectTy and inner.len >= 3:
+        return inner[2]
+      impl = inner
+    if impl.kind == nnkObjectTy and impl.len >= 3:
+      return impl[2]
+  newEmptyNode()
+
+proc typeHasField(typ: NimNode, field: string): bool {.compileTime.} =
+  let rec = recListOfSchema(typ)
+  if rec.kind == nnkRecList:
+    for id in rec:
+      if id.kind == nnkIdentDefs and fieldIdentName(id[0]) == field:
+        return true
+  false
+
+macro checkFieldOn*(schema: typed, field: static string): untyped =
+  ## Compile-time: `field` must exist on the schema object (unless it's raw SQL).
+  result = newEmptyNode()
+  # Inline isRawSqlExpr — the runtime proc is not usable from a macro.
+  if field.len == 0 or field == "*" or field[0] in {'"', '`', '('}:
+    return
+  var raw = false
+  for c in field:
+    if c in {'.', '(', ')', '#', '@', '?', ' ', '+', '-', '*', '/', ':'}:
+      raw = true
+      break
+  if raw:
+    return
+  if not typeHasField(schema, field):
+    error("Unknown field '" & field & "' in query.", schema)
+
 proc select*[T](q: Query[T], fields: varargs[string]): Query[T] =
   result = q
   result.selectFields = @[]
   for f in fields:
-    let qf = if f.contains(".") or f.contains("(") or f.contains("#") or f.contains("@") or f.contains("?"): f else: quoteIdentifier(f)
-    result.selectFields.add(qf)
+    result.selectFields.add(quoteSqlExpr(f))
 
-proc where*[T](q: Query[T], field: string, op: WhereOp, value: string): Query[T] =
+proc normalizeWhereOp(op: WhereOp, value: DbValue): WhereOp =
+  ## `= NULL` / `!= NULL` → `IS NULL` / `IS NOT NULL`.
+  if value.kind == dvNull:
+    if op in {Eq, IsNull}: return IsNull
+    if op in {Ne, NotNull}: return NotNull
+  op
+
+proc addWhere[T](q: Query[T], field: string, op: WhereOp, value: DbValue; conj = "AND"): Query[T] =
   result = q
-  result.whereClauses.add(WhereClause(field: field, op: op, value: value, conjunction: "AND"))
+  result.whereClauses.add(WhereClause(
+    field: field, op: normalizeWhereOp(op, value), value: value, conjunction: conj))
 
-proc where*[T](q: Query[T], field: string, op: WhereOp, value: SomeInteger): Query[T] =
-  ## Typed where за цели числа — без ръчно `$value`.
-  where(q, field, op, $value)
+proc where*[T](q: Query[T], field: string, op: WhereOp, value: DbValue): Query[T] =
+  addWhere(q, field, op, value, "AND")
 
-proc where*[T](q: Query[T], field: string, op: WhereOp, value: SomeFloat): Query[T] =
-  ## Typed where за float стойности.
-  where(q, field, op, $value)
-
-proc where*[T](q: Query[T], field: string, op: WhereOp, value: bool): Query[T] =
-  ## Typed where за bool (PostgreSQL `true`/`false`).
-  where(q, field, op, if value: "true" else: "false")
-
-proc orWhere*[T](q: Query[T], field: string, op: WhereOp, value: string): Query[T] =
+proc orWhere*[T](q: Query[T], field: string, op: WhereOp, value: DbValue): Query[T] =
   ## Добавя условие с OR конюнкция.
-  result = q
-  result.whereClauses.add(WhereClause(field: field, op: op, value: value, conjunction: "OR"))
+  addWhere(q, field, op, value, "OR")
 
-proc orWhere*[T](q: Query[T], field: string, op: WhereOp, value: SomeInteger): Query[T] =
-  orWhere(q, field, op, $value)
-
-proc orWhere*[T](q: Query[T], field: string, op: WhereOp, value: SomeFloat): Query[T] =
-  orWhere(q, field, op, $value)
-
-proc orWhere*[T](q: Query[T], field: string, op: WhereOp, value: bool): Query[T] =
-  orWhere(q, field, op, if value: "true" else: "false")
-
-proc orderBy*[T](q: Query[T], field: string, dir: OrderDirection = Asc): Query[T] =
+proc addOrderBy[T](q: Query[T], field: string, dir: OrderDirection): Query[T] =
   result = q
   result.orderClauses.add(OrderClause(field: field, dir: dir))
+
+proc addHaving[T](q: Query[T], field: string, op: WhereOp, value: DbValue; conjunction: string = "AND"): Query[T] =
+  result = q
+  result.havingClauses.add(HavingClause(
+    field: field, op: normalizeWhereOp(op, value), value: value,
+    conjunction: conjunction, fragmentArgs: @[]))
+
+template where*[T](q: Query[T], field: string, op: WhereOp, value: typed): Query[T] =
+  ## Compile-time field check when `field` is a string literal.
+  when compiles((const _ {.used.} = field)):
+    checkFieldOn(T, field)
+  addWhere(q, field, op, toDbValue(value), "AND")
+
+template orWhere*[T](q: Query[T], field: string, op: WhereOp, value: typed): Query[T] =
+  when compiles((const _ {.used.} = field)):
+    checkFieldOn(T, field)
+  addWhere(q, field, op, toDbValue(value), "OR")
+
+template orderBy*[T](q: Query[T], field: string, dir: OrderDirection = Asc): Query[T] =
+  when compiles((const _ {.used.} = field)):
+    checkFieldOn(T, field)
+  addOrderBy(q, field, dir)
+
+template having*[T](q: Query[T], field: string, op: WhereOp, value: typed): Query[T] =
+  when compiles((const _ {.used.} = field)):
+    checkFieldOn(T, field)
+  addHaving(q, field, op, toDbValue(value))
 
 proc orderByRaw*[T](q: Query[T], fieldExpr: string, args: varargs[string],
                     dir: OrderDirection = Asc): Query[T] =
@@ -193,7 +261,7 @@ proc onlyDeleted*[T](q: Query[T]): Query[T] =
   result = q
   result.includeDeletedVal = true
   result.whereClauses.add(WhereClause(
-    field: "deleted_at", op: NotNull, value: "", conjunction: "AND"
+    field: "deleted_at", op: NotNull, value: dbNullValue(), conjunction: "AND"
   ))
 
 proc withoutTenant*[T](q: Query[T]): Query[T] =
@@ -369,10 +437,9 @@ proc groupBy*[T](q: Query[T], fields: varargs[string]): Query[T] =
   result = q
   result.groupByFields = @fields
 
-proc having*[T](q: Query[T], field: string, op: WhereOp, value: string; conjunction: string = "AND"): Query[T] =
+proc having*[T](q: Query[T], field: string, op: WhereOp, value: DbValue; conjunction: string = "AND"): Query[T] =
   ## Добавя HAVING условие.
-  result = q
-  result.havingClauses.add(HavingClause(field: field, op: op, value: value, conjunction: conjunction, fragmentArgs: @[]))
+  addHaving(q, field, op, value, conjunction)
 
 # --- Raw SQL фрагменти ---
 
@@ -391,7 +458,7 @@ proc whereDynamic*[T](q: Query[T], frag: SqlFragment): Query[T] =
   result.whereClauses.add(WhereClause(
     field: frag.sql,
     op: Raw,
-    value: "",
+    value: dbNullValue(),
     conjunction: "AND",
     fragmentArgs: frag.args,
     isRawField: true
@@ -429,21 +496,29 @@ proc jsonbPath*(field: string, path: openArray[string]): string =
   ## Връща SQL израз `field #> '{path}'` за JSON extraction.
   result = quoteIdentifier(field) & " #> '{" & path.join(",") & "}'"
 
+proc whereRawField*[T](q: Query[T], fieldExpr: string, op: WhereOp, value: DbValue;
+                       conjunction: string = "AND"): Query[T] =
+  ## WHERE условие с raw SQL израз за поле (без автоматични кавички).
+  result = q
+  result.whereClauses.add(WhereClause(
+    field: fieldExpr, op: normalizeWhereOp(op, value), value: value,
+    conjunction: conjunction, isRawField: true
+  ))
+
 proc whereRawField*[T](q: Query[T], fieldExpr: string, op: WhereOp, value: string;
                        conjunction: string = "AND"): Query[T] =
   ## WHERE условие с raw SQL израз за поле (без автоматични кавички).
   ## Полезно за JSONB path оператори и др.
   ## Пример: `q.whereRawField(jsonbPathText("profile", ["settings","theme"]), Eq, "dark")`
-  result = q
-  result.whereClauses.add(WhereClause(
-    field: fieldExpr, op: op, value: value, conjunction: conjunction, isRawField: true
-  ))
+  whereRawField(q, fieldExpr, op, toDbValue(value), conjunction)
 
 proc orWhereRawField*[T](q: Query[T], fieldExpr: string, op: WhereOp, value: string): Query[T] =
   ## OR WHERE условие с raw SQL израз за поле.
+  let v = toDbValue(value)
   result = q
   result.whereClauses.add(WhereClause(
-    field: fieldExpr, op: op, value: value, conjunction: "OR", isRawField: true
+    field: fieldExpr, op: normalizeWhereOp(op, v), value: v,
+    conjunction: "OR", isRawField: true
   ))
 
 # --- Convenience JSONB where methods ---
@@ -488,7 +563,7 @@ proc whereIn*[T](q: Query[T], field: string, values: openArray[string]): Query[T
   for i, v in values:
     placeholders.add("$" & $(i + 1))
     args.add(v)
-  let qf = if field.contains(".") or field.contains("("): field else: quoteIdentifier(field)
+  let qf = quoteSqlExpr(field)
   whereDynamic(q, SqlFragment(sql: qf & " IN (" & placeholders.join(", ") & ")", args: args))
 
 proc whereNotIn*[T](q: Query[T], field: string, values: openArray[string]): Query[T] =
@@ -501,7 +576,7 @@ proc whereNotIn*[T](q: Query[T], field: string, values: openArray[string]): Quer
   for i, v in values:
     placeholders.add("$" & $(i + 1))
     args.add(v)
-  let qf = if field.contains(".") or field.contains("("): field else: quoteIdentifier(field)
+  let qf = quoteSqlExpr(field)
   whereDynamic(q, SqlFragment(sql: qf & " NOT IN (" & placeholders.join(", ") & ")", args: args))
 
 proc whereIn*[T](q: Query[T], field: string, sq: SubQuery[auto]): Query[T] =
@@ -509,9 +584,9 @@ proc whereIn*[T](q: Query[T], field: string, sq: SubQuery[auto]): Query[T] =
   result = q
   let frag = sq.toSubqueryFragment()
   result.whereClauses.add(WhereClause(
-    field: quoteIdentifier(field) & " IN " & frag.sql,
+    field: quoteSqlExpr(field) & " IN " & frag.sql,
     op: Raw,
-    value: "",
+    value: dbNullValue(),
     conjunction: "AND",
     fragmentArgs: frag.args,
     isRawField: true
@@ -522,9 +597,9 @@ proc whereNotIn*[T](q: Query[T], field: string, sq: SubQuery[auto]): Query[T] =
   result = q
   let frag = sq.toSubqueryFragment()
   result.whereClauses.add(WhereClause(
-    field: quoteIdentifier(field) & " NOT IN " & frag.sql,
+    field: quoteSqlExpr(field) & " NOT IN " & frag.sql,
     op: Raw,
-    value: "",
+    value: dbNullValue(),
     conjunction: "AND",
     fragmentArgs: frag.args,
     isRawField: true
@@ -537,7 +612,7 @@ proc whereExists*[T](q: Query[T], sq: SubQuery[auto]): Query[T] =
   result.whereClauses.add(WhereClause(
     field: "EXISTS " & frag.sql,
     op: Raw,
-    value: "",
+    value: dbNullValue(),
     conjunction: "AND",
     fragmentArgs: frag.args,
     isRawField: true
@@ -550,7 +625,7 @@ proc whereNotExists*[T](q: Query[T], sq: SubQuery[auto]): Query[T] =
   result.whereClauses.add(WhereClause(
     field: "NOT EXISTS " & frag.sql,
     op: Raw,
-    value: "",
+    value: dbNullValue(),
     conjunction: "AND",
     fragmentArgs: frag.args,
     isRawField: true
@@ -583,11 +658,11 @@ proc whereTsVectorMatches*[T](q: Query[T], field: string, tsq: SqlFragment;
   ## WHERE "field" @@ tsquery — full-text match.
   ## Пример: q.whereTsVectorMatches("search_vector", plaintoTsQuery("simple", "nim orm"))
   result = q
-  let qf = if field.contains("("): field else: quoteIdentifier(field)
+  let qf = quoteSqlExpr(field)
   result.whereClauses.add(WhereClause(
     field: qf & " @@ " & tsq.sql,
     op: Raw,
-    value: "",
+    value: dbNullValue(),
     conjunction: conjunction,
     fragmentArgs: tsq.args,
     isRawField: true
@@ -612,7 +687,7 @@ proc orderByTsRank*[T](q: Query[T], field: string, tsq: SqlFragment,
   ## Ако field е text колона, ползвайте toTsVector() ръчно:
   ##   q.orderByTsRank(toTsVector("simple", "content"), plaintoTsQuery(...))
   result = q
-  let qf = if field.contains("("): field else: quoteIdentifier(field)
+  let qf = quoteSqlExpr(field)
   let frag = tsRank(qf, tsq)
   result.orderClauses.add(OrderClause(
     field: frag.sql, dir: dir, fragmentArgs: frag.args, isRawField: true
@@ -622,7 +697,7 @@ proc orderByTsRankCd*[T](q: Query[T], field: string, tsq: SqlFragment,
                          dir: OrderDirection = Desc): Query[T] =
   ## ORDER BY ts_rank_cd("field", tsquery) DIR.
   result = q
-  let qf = if field.contains("("): field else: quoteIdentifier(field)
+  let qf = quoteSqlExpr(field)
   let frag = tsRankCd(qf, tsq)
   result.orderClauses.add(OrderClause(
     field: frag.sql, dir: dir, fragmentArgs: frag.args, isRawField: true
@@ -688,6 +763,47 @@ proc qualifiedTableName*(meta: SchemaMeta): string =
   else:
     quoteIdentifier(meta.tableName)
 
+proc withoutResultDecorations*[T](q: Query[T]): Query[T] =
+  ## Премахва ORDER BY / LIMIT / OFFSET / locks / windows / preload,
+  ## които не трябва да попадат в COUNT / UPDATE / DELETE.
+  result = q
+  result.orderClauses = @[]
+  result.limitVal = none(int)
+  result.offsetVal = none(int)
+  result.lockMode = lmNone
+  result.lockNoWait = false
+  result.lockSkipLocked = false
+  result.windowFunctions = @[]
+  result.preloadAssocs = @[]
+
+proc forMutation*[T](q: Query[T]): Query[T] =
+  ## Query скъсен до WHERE филтри — за UPDATE/DELETE.
+  result = q.withoutResultDecorations()
+  result.selectFields = @[]
+  result.aggregates = @[]
+  result.groupByFields = @[]
+  result.havingClauses = @[]
+  result.ctes = @[]
+  result.distinctVal = false
+  result.joinClauses = @[]
+
+const sqlTailMarkers = [
+  " GROUP BY ", " HAVING ", " ORDER BY ", " LIMIT ", " OFFSET ",
+  " FOR UPDATE", " FOR SHARE", " FOR NO KEY UPDATE", " FOR KEY SHARE"
+]
+
+proc extractWhereSql*(sql: string): string =
+  ## Връща `WHERE ...` без GROUP BY / HAVING / ORDER BY / LIMIT / OFFSET / lock.
+  let whereIdx = sql.find(" WHERE ")
+  if whereIdx < 0:
+    return ""
+  var endIdx = sql.len
+  for marker in sqlTailMarkers:
+    let i = sql.find(marker, whereIdx + 1)
+    if i >= 0 and i < endIdx:
+      endIdx = i
+  sql[whereIdx ..< endIdx]
+
 template toBoundQuery*[T](q: Query[T]): BoundQuery =
   ## Превръща Query в SQL с `$N` placeholders + seq от стойности.
   ## Template за да резолвира schemaMeta(T) в scope-а на извикване.
@@ -716,17 +832,21 @@ template toBoundQuery*[T](q: Query[T]): BoundQuery =
   if q.aggregates.len > 0:
     var aggParts: seq[string] = @[]
     for agg in q.aggregates:
+      let fieldSql = if agg.op == AggCount and (agg.field == "*" or agg.field.len == 0):
+                       "*"
+                     else:
+                       quoteSqlExpr(agg.field)
       case agg.op
       of AggCount:
-        aggParts.add("COUNT(" & quoteIdentifier(agg.field) & ") AS " & quoteIdentifier(agg.alias))
+        aggParts.add("COUNT(" & fieldSql & ") AS " & quoteIdentifier(agg.alias))
       of AggSum:
-        aggParts.add("SUM(" & quoteIdentifier(agg.field) & ") AS " & quoteIdentifier(agg.alias))
+        aggParts.add("SUM(" & fieldSql & ") AS " & quoteIdentifier(agg.alias))
       of AggAvg:
-        aggParts.add("AVG(" & quoteIdentifier(agg.field) & ") AS " & quoteIdentifier(agg.alias))
+        aggParts.add("AVG(" & fieldSql & ") AS " & quoteIdentifier(agg.alias))
       of AggMin:
-        aggParts.add("MIN(" & quoteIdentifier(agg.field) & ") AS " & quoteIdentifier(agg.alias))
+        aggParts.add("MIN(" & fieldSql & ") AS " & quoteIdentifier(agg.alias))
       of AggMax:
-        aggParts.add("MAX(" & quoteIdentifier(agg.field) & ") AS " & quoteIdentifier(agg.alias))
+        aggParts.add("MAX(" & fieldSql & ") AS " & quoteIdentifier(agg.alias))
     parts.add(aggParts.join(", "))
   elif q.selectFields.len > 0:
     var selectParts = q.selectFields
@@ -744,7 +864,7 @@ template toBoundQuery*[T](q: Query[T]): BoundQuery =
   # Joins
   if q.joinClauses.len > 0:
     for j in q.joinClauses:
-      parts.add(j.joinType & " JOIN " & j.table & " ON " & j.on)
+      parts.add(j.joinType & " JOIN " & quoteSqlExpr(j.table) & " ON " & j.on)
 
   let applyTenantFilter = meta.tenantIdColumn.len > 0 and
                           queryTenantId.len > 0 and
@@ -776,32 +896,26 @@ template toBoundQuery*[T](q: Query[T]): BoundQuery =
         wheres.add(w.conjunction)
       isFirst = false
 
-      proc quoteField(f: string): string =
-        if f.contains(".") or f.contains("(") or f.contains("#") or f.contains("@") or f.contains("?"):
-          f
-        else:
-          quoteIdentifier(f)
-
       if w.isRawField:
         case w.op
         of Eq:
-          wheres.add(w.field & " = $" & $idx); args.add(w.value); inc idx
+          wheres.add(w.field & " = $" & $idx); args.add(encodeDbValue(w.value, getQueryDialect())); inc idx
         of Ne:
-          wheres.add(w.field & " != $" & $idx); args.add(w.value); inc idx
+          wheres.add(w.field & " != $" & $idx); args.add(encodeDbValue(w.value, getQueryDialect())); inc idx
         of Gt:
-          wheres.add(w.field & " > $" & $idx); args.add(w.value); inc idx
+          wheres.add(w.field & " > $" & $idx); args.add(encodeDbValue(w.value, getQueryDialect())); inc idx
         of Gte:
-          wheres.add(w.field & " >= $" & $idx); args.add(w.value); inc idx
+          wheres.add(w.field & " >= $" & $idx); args.add(encodeDbValue(w.value, getQueryDialect())); inc idx
         of Lt:
-          wheres.add(w.field & " < $" & $idx); args.add(w.value); inc idx
+          wheres.add(w.field & " < $" & $idx); args.add(encodeDbValue(w.value, getQueryDialect())); inc idx
         of Lte:
-          wheres.add(w.field & " <= $" & $idx); args.add(w.value); inc idx
+          wheres.add(w.field & " <= $" & $idx); args.add(encodeDbValue(w.value, getQueryDialect())); inc idx
         of Like:
-          wheres.add(w.field & " LIKE $" & $idx); args.add(w.value); inc idx
+          wheres.add(w.field & " LIKE $" & $idx); args.add(encodeDbValue(w.value, getQueryDialect())); inc idx
         of Ilike:
-          wheres.add(w.field & " ILIKE $" & $idx); args.add(w.value); inc idx
+          wheres.add(w.field & " ILIKE $" & $idx); args.add(encodeDbValue(w.value, getQueryDialect())); inc idx
         of In:
-          wheres.add(w.field & " IN ($" & $idx & ")"); args.add(w.value); inc idx
+          wheres.add(w.field & " IN ($" & $idx & ")"); args.add(encodeDbValue(w.value, getQueryDialect())); inc idx
         of IsNull:
           wheres.add(w.field & " IS NULL")
         of NotNull:
@@ -824,26 +938,26 @@ template toBoundQuery*[T](q: Query[T]): BoundQuery =
           inc idx
         wheres.add(fragSql)
       else:
-        let qf = quoteField(w.field)
+        let qf = quoteSqlExpr(w.field)
         case w.op
         of Eq:
-          wheres.add(qf & " = $" & $idx); args.add(w.value); inc idx
+          wheres.add(qf & " = $" & $idx); args.add(encodeDbValue(w.value, getQueryDialect())); inc idx
         of Ne:
-          wheres.add(qf & " != $" & $idx); args.add(w.value); inc idx
+          wheres.add(qf & " != $" & $idx); args.add(encodeDbValue(w.value, getQueryDialect())); inc idx
         of Gt:
-          wheres.add(qf & " > $" & $idx); args.add(w.value); inc idx
+          wheres.add(qf & " > $" & $idx); args.add(encodeDbValue(w.value, getQueryDialect())); inc idx
         of Gte:
-          wheres.add(qf & " >= $" & $idx); args.add(w.value); inc idx
+          wheres.add(qf & " >= $" & $idx); args.add(encodeDbValue(w.value, getQueryDialect())); inc idx
         of Lt:
-          wheres.add(qf & " < $" & $idx); args.add(w.value); inc idx
+          wheres.add(qf & " < $" & $idx); args.add(encodeDbValue(w.value, getQueryDialect())); inc idx
         of Lte:
-          wheres.add(qf & " <= $" & $idx); args.add(w.value); inc idx
+          wheres.add(qf & " <= $" & $idx); args.add(encodeDbValue(w.value, getQueryDialect())); inc idx
         of Like:
-          wheres.add(qf & " LIKE $" & $idx); args.add(w.value); inc idx
+          wheres.add(qf & " LIKE $" & $idx); args.add(encodeDbValue(w.value, getQueryDialect())); inc idx
         of Ilike:
-          wheres.add(qf & " ILIKE $" & $idx); args.add(w.value); inc idx
+          wheres.add(qf & " ILIKE $" & $idx); args.add(encodeDbValue(w.value, getQueryDialect())); inc idx
         of In:
-          wheres.add(qf & " IN ($" & $idx & ")"); args.add(w.value); inc idx
+          wheres.add(qf & " IN ($" & $idx & ")"); args.add(encodeDbValue(w.value, getQueryDialect())); inc idx
         of IsNull:
           wheres.add(qf & " IS NULL")
         of NotNull:
@@ -857,55 +971,36 @@ template toBoundQuery*[T](q: Query[T]): BoundQuery =
           wheres.add(fragSql)
     parts.add(wheres.join(" "))
 
-  if q.orderClauses.len > 0:
-    parts.add("ORDER BY")
-    var orders: seq[string] = @[]
-    for o in q.orderClauses:
-      let dirStr = if o.dir == Asc: "ASC" else: "DESC"
-      if o.isRawField and o.fragmentArgs.len > 0:
-        var fragSql = o.field
-        for i in countdown(o.fragmentArgs.len, 1):
-          fragSql = fragSql.replace("$" & $i, "$" & $(idx + i - 1))
-        for arg in o.fragmentArgs:
-          args.add(arg)
-          inc idx
-        orders.add(fragSql & " " & dirStr)
-      elif o.isRawField:
-        orders.add(o.field & " " & dirStr)
-      else:
-        orders.add(quoteIdentifier(o.field) & " " & dirStr)
-    parts.add(orders.join(", "))
-
-  # Group By
+  # Group By (must precede ORDER BY)
   if q.groupByFields.len > 0:
     parts.add("GROUP BY")
-    parts.add(q.groupByFields.mapIt(quoteIdentifier(it)).join(", "))
+    parts.add(q.groupByFields.mapIt(quoteSqlExpr(it)).join(", "))
 
   # Having
   if q.havingClauses.len > 0:
     parts.add("HAVING")
     var havings: seq[string] = @[]
     for h in q.havingClauses:
-      let qf = if h.isRawField: h.field else: quoteIdentifier(h.field)
+      let qf = if h.isRawField: h.field else: quoteSqlExpr(h.field)
       case h.op
       of Eq:
-        havings.add(qf & " = $" & $idx); args.add(h.value); inc idx
+        havings.add(qf & " = $" & $idx); args.add(encodeDbValue(h.value, getQueryDialect())); inc idx
       of Ne:
-        havings.add(qf & " != $" & $idx); args.add(h.value); inc idx
+        havings.add(qf & " != $" & $idx); args.add(encodeDbValue(h.value, getQueryDialect())); inc idx
       of Gt:
-        havings.add(qf & " > $" & $idx); args.add(h.value); inc idx
+        havings.add(qf & " > $" & $idx); args.add(encodeDbValue(h.value, getQueryDialect())); inc idx
       of Gte:
-        havings.add(qf & " >= $" & $idx); args.add(h.value); inc idx
+        havings.add(qf & " >= $" & $idx); args.add(encodeDbValue(h.value, getQueryDialect())); inc idx
       of Lt:
-        havings.add(qf & " < $" & $idx); args.add(h.value); inc idx
+        havings.add(qf & " < $" & $idx); args.add(encodeDbValue(h.value, getQueryDialect())); inc idx
       of Lte:
-        havings.add(qf & " <= $" & $idx); args.add(h.value); inc idx
+        havings.add(qf & " <= $" & $idx); args.add(encodeDbValue(h.value, getQueryDialect())); inc idx
       of Like:
-        havings.add(qf & " LIKE $" & $idx); args.add(h.value); inc idx
+        havings.add(qf & " LIKE $" & $idx); args.add(encodeDbValue(h.value, getQueryDialect())); inc idx
       of Ilike:
-        havings.add(qf & " ILIKE $" & $idx); args.add(h.value); inc idx
+        havings.add(qf & " ILIKE $" & $idx); args.add(encodeDbValue(h.value, getQueryDialect())); inc idx
       of In:
-        havings.add(qf & " IN ($" & $idx & ")"); args.add(h.value); inc idx
+        havings.add(qf & " IN ($" & $idx & ")"); args.add(encodeDbValue(h.value, getQueryDialect())); inc idx
       of IsNull:
         havings.add(qf & " IS NULL")
       of NotNull:
@@ -924,6 +1019,25 @@ template toBoundQuery*[T](q: Query[T]): BoundQuery =
         havingParts.add(q.havingClauses[i].conjunction)
       havingParts.add(h)
     parts.add(havingParts.join(" "))
+
+  if q.orderClauses.len > 0:
+    parts.add("ORDER BY")
+    var orders: seq[string] = @[]
+    for o in q.orderClauses:
+      let dirStr = if o.dir == Asc: "ASC" else: "DESC"
+      if o.isRawField and o.fragmentArgs.len > 0:
+        var fragSql = o.field
+        for i in countdown(o.fragmentArgs.len, 1):
+          fragSql = fragSql.replace("$" & $i, "$" & $(idx + i - 1))
+        for arg in o.fragmentArgs:
+          args.add(arg)
+          inc idx
+        orders.add(fragSql & " " & dirStr)
+      elif o.isRawField:
+        orders.add(o.field & " " & dirStr)
+      else:
+        orders.add(quoteSqlExpr(o.field) & " " & dirStr)
+    parts.add(orders.join(", "))
 
   if q.limitVal.isSome:
     parts.add("LIMIT $" & $idx)

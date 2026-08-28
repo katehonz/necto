@@ -37,6 +37,58 @@
 ##    dump/1   → dumpValue
 
 import std/[strutils, options, json, times, tables]
+import ./adapters/base
+
+const nectoDbNull* = "\x1ENECTO_DB_NULL\x1E"
+  ## Sentinel bound/loaded as SQL NULL. Not a legal user string in practice.
+
+proc isDbNull*(val: string): bool {.inline.} =
+  val == nectoDbNull
+
+proc dbNull*(): string {.inline.} =
+  nectoDbNull
+
+type
+  DbValueKind* = enum
+    dvNull, dvText, dvInt, dvFloat, dvBool, dvBytes
+
+  DbValue* = object
+    ## Typed bind value. Encoded to the wire format only at SQL execution.
+    case kind*: DbValueKind
+    of dvNull:
+      discard
+    of dvText:
+      text*: string
+    of dvInt:
+      i*: int64
+    of dvFloat:
+      f*: float
+    of dvBool:
+      b*: bool
+    of dvBytes:
+      bytes*: seq[byte]
+
+proc dbNullValue*(): DbValue {.inline.} =
+  DbValue(kind: dvNull)
+
+proc toDbValue*(s: string): DbValue {.inline.} =
+  if isDbNull(s): DbValue(kind: dvNull)
+  else: DbValue(kind: dvText, text: s)
+
+proc toDbValue*(i: SomeInteger): DbValue {.inline.} =
+  DbValue(kind: dvInt, i: int64(i))
+
+proc toDbValue*(f: SomeFloat): DbValue {.inline.} =
+  DbValue(kind: dvFloat, f: float(f))
+
+proc toDbValue*(b: bool): DbValue {.inline.} =
+  DbValue(kind: dvBool, b: b)
+
+proc toDbValue*(v: DbValue): DbValue {.inline.} = v
+
+proc toDbValue*[T](val: Option[T]): DbValue {.inline.} =
+  if val.isSome: toDbValue(val.get)
+  else: dbNullValue()
 
 # --- Custom type registry (compile-time) ---
 
@@ -396,23 +448,24 @@ proc loadPgArray*(val: string, T: typedesc[seq[bool]]): seq[bool] =
     result.add(loadValueSlice(val, s, e, bool))
 
 proc loadValue*(val: string, T: typedesc[string]): string =
-  ## Load стринг от БД (просто връща стойността).
-  val
+  ## Load стринг от БД. SQL NULL → празен низ за не-optional полета.
+  if isDbNull(val): "" else: val
 
 proc loadValue*(val: string, T: typedesc[int]): int =
-  if val.len == 0: 0 else: parseInt(val)
+  if isDbNull(val) or val.len == 0: 0 else: parseInt(val)
 
 proc loadValue*(val: string, T: typedesc[int16]): int16 =
-  if val.len == 0: 0'i16 else: int16(parseInt(val))
+  if isDbNull(val) or val.len == 0: 0'i16 else: int16(parseInt(val))
 
 proc loadValue*(val: string, T: typedesc[int64]): int64 =
-  if val.len == 0: 0'i64 else: parseBiggestInt(val)
+  if isDbNull(val) or val.len == 0: 0'i64 else: parseBiggestInt(val)
 
 proc loadValue*(val: string, T: typedesc[float]): float =
-  if val.len == 0: 0.0 else: parseFloat(val)
+  if isDbNull(val) or val.len == 0: 0.0 else: parseFloat(val)
 
 proc loadValue*(val: string, T: typedesc[bool]): bool =
-  val == "t" or val == "true" or val == "1" or val == "TRUE"
+  if isDbNull(val) or val.len == 0: false
+  else: val == "t" or val == "true" or val == "1" or val == "TRUE"
 
 proc normalizePgTimestamp(val: string): string =
   ## Нормализира PostgreSQL timestamp за Nim times.parse.
@@ -430,7 +483,7 @@ proc normalizePgTimestamp(val: string): string =
 
 proc loadValue*(val: string, T: typedesc[DateTime]): DateTime =
   ## Load DateTime от PostgreSQL timestamp string.
-  if val.len == 0:
+  if isDbNull(val) or val.len == 0:
     result = fromUnix(0).utc
     return
   let clean = normalizePgTimestamp(val)
@@ -470,7 +523,7 @@ proc loadValue*(val: string, T: typedesc[TimeOfDay]): TimeOfDay =
 
 proc loadValue*(val: string, T: typedesc[JsonNode]): JsonNode =
   ## Load JsonNode от PostgreSQL json/jsonb string.
-  if val.len == 0:
+  if isDbNull(val) or val.len == 0 or val == "null":
     result = newJNull()
   else:
     result = parseJson(val)
@@ -545,8 +598,8 @@ proc loadValue*(val: string, T: typedesc[seq[byte]]): seq[byte] =
     result = @[]
 
 proc loadValue*[T](val: string, OptT: typedesc[Option[T]]): Option[T] =
-  ## Load Option[T] — ако val е празен, връща none.
-  if val.len == 0:
+  ## Load Option[T] — SQL NULL (и празен низ) → none.
+  if isDbNull(val) or val.len == 0:
     none(T)
   else:
     some(loadValue(val, T))
@@ -592,7 +645,7 @@ proc dumpValue*[T](val: Option[T]): string =
   if val.isSome:
     dumpValue(val.get)
   else:
-    ""
+    nectoDbNull
 
 proc needsPgArrayQuote(s: string): bool =
   ## Проверява дали стойността трябва да се quote-не в PostgreSQL array.
@@ -633,6 +686,31 @@ proc dumpValue*(val: seq[byte]): string =
   for b in val:
     hexStr.add(toHex(int(b), 2).toLowerAscii())
   result = hexStr
+
+proc encodeDbValue*(v: DbValue; dialect: SqlDialect = pdPostgres): string =
+  ## Text-protocol encoding (+ `nectoDbNull` sentinel for SQL NULL).
+  case v.kind
+  of dvNull:
+    nectoDbNull
+  of dvText:
+    v.text
+  of dvInt:
+    $v.i
+  of dvFloat:
+    $v.f
+  of dvBool:
+    case dialect
+    of pdSqlite, pdMariaDb:
+      if v.b: "1" else: "0"
+    else:
+      if v.b: "true" else: "false"
+  of dvBytes:
+    dumpValue(v.bytes)
+
+proc encodeDbValues*(args: openArray[DbValue]; dialect: SqlDialect = pdPostgres): seq[string] =
+  result = newSeq[string](args.len)
+  for i, v in args:
+    result[i] = encodeDbValue(v, dialect)
 
 # --- Cast raw string to DB-safe string ---
 
@@ -680,8 +758,8 @@ proc castToDb*(val: string, nimTypeStr: string): string =
       raise newException(ValueError, "Invalid bytea format: " & val)
   else:
     if nimTypeStr.startsWith("Option["):
-      if val.len == 0 or val == "null" or val == "nil":
-        result = "null"
+      if val.len == 0 or val == "null" or val == "nil" or isDbNull(val):
+        result = nectoDbNull
       else:
         let inner = nimTypeStr[7..^2]
         result = castToDb(val, inner)
@@ -727,7 +805,7 @@ proc dbType*[T](B: typedesc[JsonB[T]]): string = "jsonb"
 
 proc loadValue*[T](val: string, B: typedesc[JsonB[T]]): JsonB[T] =
   ## Load JSONB стринг от PostgreSQL в типизиран JsonB[T].
-  if val.len == 0 or val == "null":
+  if isDbNull(val) or val.len == 0 or val == "null":
     result = JsonB[T](val: default(T))
   else:
     result = JsonB[T](val: parseJson(val).to(T))

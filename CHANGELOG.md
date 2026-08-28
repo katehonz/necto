@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Typed bind values (`DbValue`)**: `where`/`orWhere`/`having` keep int/float/bool/NULL until SQL generation. Bool encodes as `true`/`false` (PostgreSQL) or `1`/`0` (SQLite/MariaDB). `where(field, Eq, dbNullValue())` becomes `IS NULL`.
+- **Compile-time field checks** on `where` / `orWhere` / `orderBy` / `having` / `groupBy` when the field is a string literal (same guarantee as `whereIt`).
 - **Row-level multi-tenancy (`tenant_id`)**: `tenant_id` / `tenant_scoped` in schema, `repo.setTenantId` / `clearTenantId` / `tenantScope`, automatic `WHERE` filter + insert injection, `withoutTenant()` escape hatch.
 - **Query DX**:
   - Typed `where` / `orWhere` for `int`, `float`, `bool` (no manual string conversion).
@@ -20,6 +22,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`UnauthorizedError`** for missing/invalid bearer tokens.
 
 ### Fixed
+- **INSERT/UPDATE round-trip**: PostgreSQL and SQLite now load the written row from `RETURNING *` instead of a second `SELECT`. UUID (and other non-int) primary keys work on insert.
+- **SQL NULL**: `Option` none and empty optional casts bind as real NULL (libpq `nil` / `NULL` literal), and `PQgetisnull` loads them as `none` instead of empty string / `"null"`.
+- **Identifier quoting**: `quoteIdentifier` follows the adapter dialect (`"id"` vs `` `id` ``) via thread-local `setQueryDialect`.
+- **Connection pool wait**: exhausted pools wait on a condition variable (signaled on checkin) with `pthread_cond_timedwait` timeout instead of `sleep(10)`.
+- **SQL clause order**: `GROUP BY` / `HAVING` now emit before `ORDER BY` (previously invalid SQL when both were present).
+- **`COUNT(*)` quoting**: aggregate `count()` no longer generates `COUNT("*")`.
+- **`repo.count` / `update_all` / `delete_all`**: strip `ORDER BY`, `LIMIT`, `OFFSET` and row locks so COUNT is over the full filter and UPDATE/DELETE stay valid PostgreSQL.
+- **Connection pool**: checkout no longer holds the pool lock while opening a TCP connection (also removes a deadlock if `connect` failed). Full pools wait up to `checkoutTimeoutMs` (default 5s) instead of failing immediately.
+- **Prepared statement names**: `stmtCounter` is incremented under `prepLock`.
+- **Delete PK**: `delete` / `hardDelete` / soft-delete look up the primary key from loaded data, not only from changeset `changes`.
+- **`insert_all`**: rows missing a column used by another row in the batch emit `DEFAULT` instead of producing mismatched `VALUES` tuples.
+- **Streaming in a transaction**: cursor streams reuse the current transaction — they no longer `BEGIN`/`COMMIT`/`disconnect` and abort the outer transaction.
+- **belongs_to preload GC**: association cache is a traced `RootRef` (schemas inherit `RootObj`) instead of a raw `pointer`, so preloaded parents are not collected while still referenced.
+- **`validateRequired`**: falls back to existing record data (Ecto-style), so updates that omit unchanged required fields stay valid.
 - **Prepared statement cache reuse**: per-physical-connection cache now survives checkout/checkin (fewer re-prepares).
 - **CTE placeholder renumbering**: replaced hardcoded 30-placeholder loop with `shiftPlaceholders` (handles arbitrary arg counts safely).
 - **`whereDynamic` with zero-arg fragments**: fragments like `1 = 0` no longer get identifier-quoted (fixes empty `whereIn` lists).

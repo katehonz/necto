@@ -16,6 +16,7 @@ tests/t_schema_generator
 tests/t_new_types
 tests/t_phase2_types
 tests/t_postgres_types
+tests/t_where_unknown_field
 src/necto_migrate
 src/necto_rollback
 src/necto_status
