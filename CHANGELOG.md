@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-08-28
+
 ### Added
 - **Typed bind values (`DbValue`)**: `where`/`orWhere`/`having` keep int/float/bool/NULL until SQL generation. Bool encodes as `true`/`false` (PostgreSQL) or `1`/`0` (SQLite/MariaDB). `where(field, Eq, dbNullValue())` becomes `IS NULL`.
 - **Compile-time field checks** on `where` / `orWhere` / `orderBy` / `having` / `groupBy` when the field is a string literal (same guarantee as `whereIt`).
@@ -55,7 +57,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `CHANGELOG.md` and `CONTRIBUTING.md`.
 
 ### Changed
-- Bumped version in `necto.nimble` to `0.3.2`.
+- Bumped version in `necto.nimble` to `0.9.2`.
 - Updated `tests/support/test_repo.nim` to read database credentials from environment variables (`NECTO_HOST`, `NECTO_USER`, `NECTO_PASSWORD`, `NECTO_DATABASE`) for CI compatibility.
 - Updated `PLAN.md` with a disclaimer pointing to `ROADMAP.md` and `docs/`, and fixed references to non-existent files (`query_builder.nim`, `query_dsl.nim`, `preloader.nim`).
 
